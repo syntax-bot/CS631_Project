@@ -1,0 +1,136 @@
+CREATE EXTENSION qcache;
+LOAD 'qcache';
+CREATE TABLE t (id int PRIMARY KEY, v int);
+INSERT INTO t SELECT g, g FROM generate_series(1, 1000) g;
+SELECT qcache_reset();
+ qcache_reset 
+--------------
+ 
+(1 row)
+
+-- 1. The second identical SELECT is served from the cache
+SELECT count(*), sum(v) FROM t;
+ count |  sum   
+-------+--------
+  1000 | 500500
+(1 row)
+
+SELECT count(*), sum(v) FROM t;
+ count |  sum   
+-------+--------
+  1000 | 500500
+(1 row)
+
+SELECT hits, misses, stores FROM qcache_stats();
+ hits | misses | stores 
+------+--------+--------
+    1 |      1 |      1
+(1 row)
+
+-- 2. A committed write to t invalidates it; the new result is correct
+UPDATE t SET v = v + 1 WHERE id = 1;
+SELECT count(*), sum(v) FROM t;
+ count |  sum   
+-------+--------
+  1000 | 500501
+(1 row)
+
+SELECT hits, misses, invalidations FROM qcache_stats();
+ hits | misses | invalidations 
+------+--------+---------------
+    1 |      2 |             1
+(1 row)
+
+-- 3. Inside a transaction that wrote to t, the cache is bypassed,
+--    so the transaction sees its own change
+BEGIN;
+UPDATE t SET v = 0 WHERE id = 2;
+SELECT count(*), sum(v) FROM t;
+ count |  sum   
+-------+--------
+  1000 | 500499
+(1 row)
+
+ROLLBACK;
+-- after the rollback the saved result is still valid and is used
+SELECT count(*), sum(v) FROM t;
+ count |  sum   
+-------+--------
+  1000 | 500501
+(1 row)
+
+SELECT hits, misses FROM qcache_stats();
+ hits | misses 
+------+--------
+    2 |      2
+(1 row)
+
+-- 4. Multi-row results keep their order and row count
+SELECT * FROM t WHERE id <= 3 ORDER BY id;
+ id | v 
+----+---
+  1 | 2
+  2 | 2
+  3 | 3
+(3 rows)
+
+SELECT * FROM t WHERE id <= 3 ORDER BY id;
+ id | v 
+----+---
+  1 | 2
+  2 | 2
+  3 | 3
+(3 rows)
+
+-- 5. Queries with non-immutable functions are never cached
+SELECT qcache_reset();
+ qcache_reset 
+--------------
+ 
+(1 row)
+
+SELECT count(*) FROM t WHERE random() >= 0;
+ count 
+-------
+  1000
+(1 row)
+
+SELECT count(*) FROM t WHERE random() >= 0;
+ count 
+-------
+  1000
+(1 row)
+
+SELECT count(*) > 0 AS ok FROM t WHERE now() > '2000-01-01';
+ ok 
+----
+ t
+(1 row)
+
+SELECT count(*) > 0 AS ok FROM t WHERE now() > '2000-01-01';
+ ok 
+----
+ t
+(1 row)
+
+SELECT hits, misses, stores FROM qcache_stats();
+ hits | misses | stores 
+------+--------+--------
+    0 |      0 |      0
+(1 row)
+
+-- 6. What is in the cache
+SELECT count(*) FROM t;
+ count 
+-------
+  1000
+(1 row)
+
+SELECT query, row_count, hits FROM qcache_entries();
+         query          | row_count | hits 
+------------------------+-----------+------
+ SELECT count(*) FROM t |         1 |    0
+(1 row)
+
+DROP TABLE t;
+DROP EXTENSION qcache;
