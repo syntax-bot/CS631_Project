@@ -37,9 +37,33 @@ SELECT count(*) > 0 AS ok FROM t WHERE now() > '2000-01-01';
 SELECT count(*) > 0 AS ok FROM t WHERE now() > '2000-01-01';
 SELECT hits, misses, stores FROM qcache_stats();
 
--- 6. What is in the cache
+-- 6. DDL clears the whole cache, and SELECT * shows the new column
+SELECT qcache_reset();
+SELECT * FROM t WHERE id = 5;
+SELECT * FROM t WHERE id = 5;
+ALTER TABLE t ADD COLUMN w int DEFAULT 7;
+SELECT * FROM t WHERE id = 5;
+SELECT hits, misses, invalidations FROM qcache_stats();
+
+-- 7. TRUNCATE invalidates
 SELECT count(*) FROM t;
+SELECT count(*) FROM t;
+TRUNCATE t;
+SELECT count(*) FROM t;
+
+-- 8. Turning the cache off still tracks writes
+CREATE TABLE big (id int, doc text);
+INSERT INTO big VALUES (1, 'x');
+SELECT qcache_reset();
+SELECT count(*) FROM big;
+SET qcache.enabled = off;
+INSERT INTO big VALUES (2, 'x');
+SET qcache.enabled = on;
+SELECT count(*) FROM big;
+SELECT hits, invalidations FROM qcache_stats();
+
+-- 9. What is in the cache
 SELECT query, row_count, hits FROM qcache_entries();
 
-DROP TABLE t;
+DROP TABLE t, big;
 DROP EXTENSION qcache;

@@ -1,3 +1,4 @@
+/* qcache: a simple query result cache for PostgreSQL 18. */
 #include "postgres.h"
 
 #include "access/htup_details.h"
@@ -21,6 +22,7 @@
 #endif
 
 PG_MODULE_MAGIC;
+/* Cache settings. */
 
 static bool setting_enabled = true;		
 static bool setting_debug = false;		
@@ -31,6 +33,7 @@ static bool setting_debug = false;
 			ereport(NOTICE, (errmsg(__VA_ARGS__))); \
 	} while (0)
 
+/* A cached query result. */
 typedef struct CachedResult
 {
 	uint64		key_hash;		
@@ -48,6 +51,7 @@ typedef struct CachedResult
 	MemoryContext memory;		
 } CachedResult;
 
+/* The query currently being prepared for caching. */
 typedef struct CurrentQuery
 {
 	QueryDesc  *query_desc;		
@@ -61,6 +65,7 @@ typedef struct CurrentQuery
 	bool		already_ran;	
 } CurrentQuery;
 
+/* Collect rows while sending them to the client. */
 typedef struct RowCollector
 {
 	DestReceiver base;			
@@ -73,6 +78,7 @@ typedef struct RowCollector
 	Size		size_bytes;
 } RowCollector;
 
+/* Cache data and counters for this connection. */
 static MemoryContext cache_memory = NULL;	
 static HTAB *cache_table = NULL;	
 static Size cache_size_bytes = 0;	
@@ -102,6 +108,7 @@ PG_FUNCTION_INFO_V1(qcache_stats);
 PG_FUNCTION_INFO_V1(qcache_entries);
 PG_FUNCTION_INFO_V1(qcache_reset);
 
+/* Look up a result using its hash and full key. */
 static CachedResult *
 find_cached_result(uint64 key_hash, const char *key, int key_len)
 {
@@ -118,6 +125,7 @@ find_cached_result(uint64 key_hash, const char *key, int key_len)
 	return entry;
 }
 
+/* Remove one result from the cache. */
 /* Delete one saved result and free its memory. */
 static void
 remove_cached_result(CachedResult *entry)
@@ -131,6 +139,7 @@ remove_cached_result(CachedResult *entry)
 	MemoryContextDelete(entry_memory);
 }
 
+/* Remove all saved results. */
 static int
 remove_all_cached_results(void)
 {
@@ -148,6 +157,7 @@ remove_all_cached_results(void)
 	return removed;
 }
 
+/* Clear the current query data. */
 /* Forget the current query and free its memory. */
 static void
 forget_current_query(void)
@@ -157,6 +167,7 @@ forget_current_query(void)
 	memset(&current, 0, sizeof(current));
 }
 
+/* Reset the write flag for the transaction. */
 /* Forget what the current transaction changed. */
 static void
 forget_transaction_changes(void)
@@ -164,6 +175,7 @@ forget_transaction_changes(void)
 	transaction_wrote = false;
 }
 
+/* Check if the query can be cached. */
 static const char *
 check_query_tree(Query *query)
 {
@@ -182,6 +194,7 @@ check_query_tree(Query *query)
 	return NULL;
 }
 
+/* Let PostgreSQL plan the query and remember the cache check. */
 static PlannedStmt *
 qcache_planner_hook(Query *query, const char *query_string, int cursor_options,
 					ParamListInfo bound_params)
@@ -204,6 +217,7 @@ qcache_planner_hook(Query *query, const char *query_string, int cursor_options,
 	return plan;
 }
 
+/* Check the plan before caching it. */
 static const char *
 check_plan(QueryDesc *query_desc, int eflags)
 {
@@ -232,6 +246,7 @@ check_plan(QueryDesc *query_desc, int eflags)
 	return NULL;
 }
 
+/* Build a key using the user and query text. */
 static void
 build_cache_key(QueryDesc *query_desc)
 {
@@ -262,6 +277,7 @@ build_cache_key(QueryDesc *query_desc)
 	current.query_text = pnstrdup(text + start, length);
 }
 
+/* Check the query and prepare it for caching. */
 static void
 qcache_ExecutorStart_hook(QueryDesc *query_desc, int eflags)
 {
@@ -302,6 +318,7 @@ qcache_ExecutorStart_hook(QueryDesc *query_desc, int eflags)
 	MemoryContextSwitchTo(old_memory);
 }
 
+/* Collect rows on a cache miss. */
 /* ---- 3a. The row collector (used on a miss) ---- */
 
 static bool
@@ -337,6 +354,7 @@ collector_receive_row(TupleTableSlot *slot, DestReceiver *self)
 	return collector->real_receiver->receiveSlot(slot, collector->real_receiver);
 }
 
+/* Pass startup to the real receiver. */
 static void
 collector_startup(DestReceiver *self, int operation, TupleDesc columns)
 {
@@ -345,6 +363,7 @@ collector_startup(DestReceiver *self, int operation, TupleDesc columns)
 	collector->real_receiver->rStartup(collector->real_receiver, operation, columns);
 }
 
+/* Pass shutdown to the real receiver. */
 static void
 collector_shutdown(DestReceiver *self)
 {
@@ -353,12 +372,14 @@ collector_shutdown(DestReceiver *self)
 	collector->real_receiver->rShutdown(collector->real_receiver);
 }
 
+/* Nothing to clean up here. */
 static void
 collector_destroy(DestReceiver *self)
 {
 	
 }
 
+/* Create a receiver that saves rows and sends them to the client. */
 static RowCollector *
 create_row_collector(DestReceiver *real_receiver)
 {
@@ -376,6 +397,7 @@ create_row_collector(DestReceiver *real_receiver)
 	return collector;
 }
 
+/* Save the collected rows in the cache. */
 /* ---- 3b. Saving a result (after a miss) ---- */
 
 static void
@@ -419,6 +441,7 @@ save_result(RowCollector *collector)
 			  (unsigned long long) entry->num_rows, size);
 }
 
+/* Send cached rows to the client. */
 /* ---- 3c. Sending saved rows (on a hit) ---- */
 
 static void
@@ -447,6 +470,7 @@ send_saved_rows(QueryDesc *query_desc, CachedResult *entry)
 	MemoryContextSwitchTo(old_memory);
 }
 
+/* Check for a cache hit; otherwise run and save the query. */
 /* ---- 3d. The hook itself ---- */
 
 static void
@@ -510,6 +534,7 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 	}
 }
 
+/* Clear query state when execution ends. */
 static void
 qcache_ExecutorEnd_hook(QueryDesc *query_desc)
 {
@@ -523,6 +548,7 @@ qcache_ExecutorEnd_hook(QueryDesc *query_desc)
 		standard_ExecutorEnd(query_desc);
 }
 
+/* Clear cached results after a transaction changes data. */
 static void
 qcache_transaction_callback(XactEvent event, void *arg)
 {
@@ -557,6 +583,7 @@ qcache_transaction_callback(XactEvent event, void *arg)
 	}
 }
 
+/* Return cache statistics. */
 Datum
 qcache_stats(PG_FUNCTION_ARGS)
 {
@@ -578,6 +605,7 @@ qcache_stats(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(result_columns, values, nulls)));
 }
 
+/* Return the saved query entries. */
 Datum
 qcache_entries(PG_FUNCTION_ARGS)
 {
@@ -604,6 +632,7 @@ qcache_entries(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
+/* Clear the cache and reset the counters. */
 Datum
 qcache_reset(PG_FUNCTION_ARGS)
 {
@@ -616,6 +645,7 @@ qcache_reset(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+/* Set up the cache and PostgreSQL hooks. */
 void
 _PG_init(void)
 {

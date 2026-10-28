@@ -119,18 +119,94 @@ SELECT hits, misses, stores FROM qcache_stats();
     0 |      0 |      0
 (1 row)
 
--- 6. What is in the cache
+-- 6. DDL clears the whole cache, and SELECT * shows the new column
+SELECT qcache_reset();
+ qcache_reset 
+--------------
+ 
+(1 row)
+
+SELECT * FROM t WHERE id = 5;
+ id | v 
+----+---
+  5 | 5
+(1 row)
+
+SELECT * FROM t WHERE id = 5;
+ id | v 
+----+---
+  5 | 5
+(1 row)
+
+ALTER TABLE t ADD COLUMN w int DEFAULT 7;
+SELECT * FROM t WHERE id = 5;
+ id | v | w 
+----+---+---
+  5 | 5 | 7
+(1 row)
+
+SELECT hits, misses, invalidations FROM qcache_stats();
+ hits | misses | invalidations 
+------+--------+---------------
+    1 |      2 |             1
+(1 row)
+
+-- 7. TRUNCATE invalidates
 SELECT count(*) FROM t;
  count 
 -------
   1000
 (1 row)
 
-SELECT query, row_count, hits FROM qcache_entries();
-         query          | row_count | hits 
-------------------------+-----------+------
- SELECT count(*) FROM t |         1 |    0
+SELECT count(*) FROM t;
+ count 
+-------
+  1000
 (1 row)
 
-DROP TABLE t;
+TRUNCATE t;
+SELECT count(*) FROM t;
+ count 
+-------
+     0
+(1 row)
+
+-- 8. Turning the cache off still tracks writes
+CREATE TABLE big (id int, doc text);
+INSERT INTO big VALUES (1, 'x');
+SELECT qcache_reset();
+ qcache_reset 
+--------------
+ 
+(1 row)
+
+SELECT count(*) FROM big;
+ count 
+-------
+     1
+(1 row)
+
+SET qcache.enabled = off;
+INSERT INTO big VALUES (2, 'x');
+SET qcache.enabled = on;
+SELECT count(*) FROM big;
+ count 
+-------
+     2
+(1 row)
+
+SELECT hits, invalidations FROM qcache_stats();
+ hits | invalidations 
+------+---------------
+    0 |             1
+(1 row)
+
+-- 9. What is in the cache
+SELECT query, row_count, hits FROM qcache_entries();
+          query           | row_count | hits 
+--------------------------+-----------+------
+ SELECT count(*) FROM big |         1 |    0
+(1 row)
+
+DROP TABLE t, big;
 DROP EXTENSION qcache;
