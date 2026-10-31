@@ -13,11 +13,13 @@ tables commits.
 | `qcache--1.0.sql`, `qcache.control` | SQL functions and extension metadata |
 | `Makefile` | Build with PGXS |
 | `sql/qcache.sql`, `expected/qcache.out` | Regression test |
+| `demo.sql` | Checkpoint demo |
 | `tour.sql` | Short walk through hits, misses and invalidation with `qcache.debug` on |
+| `bench/` | pgbench comparison, cache off vs on |
 
 ## Install
 
-The steps assume source build is installed under `/usr/local/pgsql`
+The steps assume your source build is installed under `/usr/local/pgsql`
 (the default `--prefix`). Change the path if you used another one.
 
 1. **Use your build's tools.** Every command must use the `pg_config` of
@@ -77,7 +79,7 @@ turns it on for that session only.
 
 ```sql
 SELECT * FROM qcache_stats();     -- entries, bytes, hits, misses, ...
-SELECT * FROM qcache_entries();   -- what is cached
+SELECT * FROM qcache_entries();   -- what is cached, most recent first
 SELECT qcache_reset();            -- empty the cache, zero the counters
 SET qcache.enabled = off;         -- bypass the cache in this session
 SET qcache.debug = on;            -- print a message at every step
@@ -87,8 +89,20 @@ SET qcache.debug = on;            -- print a message at every step
 | --- | --- | --- |
 | `qcache.enabled` | `on` | Use and fill the cache |
 | `qcache.debug` | `off` | Print a NOTICE at every step (hit, miss, saved, invalidated, why not cached) |
+| `qcache.max_size` | `64MB` | Memory for cached results, per connection |
+| `qcache.max_result_size` | `1MB` | Larger results are not cached |
 
 All counters and entries belong to the current connection.
+
+## Demo and benchmark
+
+```bash
+psql -d postgres -f demo.sql                 # 2M-row table, timing on
+bench/run_bench.sh postgres 10 1             # database, seconds, clients (1 for a clean comparison)
+```
+
+On our test machine the demo query took 236 ms on the first run and
+0.5 ms from the cache.
 
 ## How it works
 
@@ -105,12 +119,16 @@ code is not changed.
 | `ProcessUtility_hook` | Notices DDL and other utility commands |
 | transaction callback | At commit, drops results that read a changed table; at abort, forgets pending changes |
 
-The key is the user and the query text. Saved rows live in a hash table.
+The key is the user, the statement's position in the query string, the
+tables the query resolved to, and the query text. Saved rows live in a
+hash table with least-recently-used eviction.
 
 **What is never cached:** anything but a plain `SELECT`; queries using
 non-immutable functions such as `now()` or `random()`; `FOR UPDATE`;
-row-level security; queries with parameters; cursors, `EXPLAIN` and queries
-inside functions; and tables the current transaction has already changed.
+temporary, partitioned, inherited, foreign and system tables; row-level
+security; queries with parameters; cursors, `EXPLAIN` and queries inside
+functions; transactions in `REPEATABLE READ` or `SERIALIZABLE`; and tables
+the current transaction has already changed.
 
 **Invalidation:** every `INSERT`, `UPDATE`, `DELETE` or `MERGE`, at any
 level (including triggers and functions), records the tables it touches.
@@ -127,10 +145,3 @@ or `COPY` clears the whole cache at commit.
 - Only the simple query protocol benefits (psql, `pgbench -M simple`).
   Prepared statements and parameterized queries are not cached.
 - A hit still pays for parsing, planning and executor startup.
-- TODO before checkpoint 1:
-  - The cache has no size limit; it grows until the connection ends.
-  - The key is the whole query string, so the two statements of
-    `SELECT 1; SELECT 2` share one key.
-  - Rows are copied as they are; large (TOASTed) values are not copied out.
-  - Partitions, inheritance, system catalogs and temporary tables are not
-    excluded yet.

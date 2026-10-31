@@ -37,7 +37,13 @@ SELECT count(*) > 0 AS ok FROM t WHERE now() > '2000-01-01';
 SELECT count(*) > 0 AS ok FROM t WHERE now() > '2000-01-01';
 SELECT hits, misses, stores FROM qcache_stats();
 
--- 6. DDL clears the whole cache, and SELECT * shows the new column
+-- 6. Temporary tables are never cached
+CREATE TEMP TABLE tmp AS SELECT 1 AS x;
+SELECT * FROM tmp;
+SELECT * FROM tmp;
+SELECT hits, stores FROM qcache_stats();
+
+-- 7. DDL clears the whole cache, and SELECT * shows the new column
 SELECT qcache_reset();
 SELECT * FROM t WHERE id = 5;
 SELECT * FROM t WHERE id = 5;
@@ -45,15 +51,32 @@ ALTER TABLE t ADD COLUMN w int DEFAULT 7;
 SELECT * FROM t WHERE id = 5;
 SELECT hits, misses, invalidations FROM qcache_stats();
 
--- 7. TRUNCATE invalidates
+-- 8. TRUNCATE invalidates
 SELECT count(*) FROM t;
 SELECT count(*) FROM t;
 TRUNCATE t;
 SELECT count(*) FROM t;
 
--- 8. Turning the cache off still tracks writes
+-- 9. Two statements in one query string get separate entries
+SELECT qcache_reset();
+SELECT 1 AS a\; SELECT 2 AS a;
+SELECT 1 AS a\; SELECT 2 AS a;
+SELECT hits, stores FROM qcache_stats();
+
+-- 10. Large out-of-line (TOASTed) values are copied correctly
 CREATE TABLE big (id int, doc text);
-INSERT INTO big VALUES (1, 'x');
+ALTER TABLE big ALTER COLUMN doc SET STORAGE EXTERNAL;
+INSERT INTO big SELECT 1, string_agg(md5(g::text), '') FROM generate_series(1, 200) g;
+SELECT qcache_reset();
+SELECT md5(doc) AS expected FROM big \gset
+-- fetch the whole value twice; the second copy comes from the cache
+SELECT doc FROM big \gset first_
+SELECT doc FROM big \gset second_
+SELECT md5(:'first_doc') = :'expected' AS first_ok,
+       md5(:'second_doc') = :'expected' AS second_ok;
+SELECT hits FROM qcache_stats();
+
+-- 11. Turning the cache off still tracks writes
 SELECT qcache_reset();
 SELECT count(*) FROM big;
 SET qcache.enabled = off;
@@ -62,7 +85,7 @@ SET qcache.enabled = on;
 SELECT count(*) FROM big;
 SELECT hits, invalidations FROM qcache_stats();
 
--- 9. What is in the cache
+-- 12. What is in the cache
 SELECT query, row_count, hits FROM qcache_entries();
 
 DROP TABLE t, big;
