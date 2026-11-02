@@ -56,13 +56,18 @@
  *   - Shared memory can only be set up at server start, so qcache must now
  *     be in shared_preload_libraries.  (PART 9)
  *
+ * WHAT CHANGED IN STEP 2 (closing the commit window)
+ *   - PostgreSQL makes a commit visible to other connections a moment BEFORE
+ *     it calls our callback with XACT_EVENT_COMMIT.  So a writer now bumps
+ *     its tables' versions TWICE: at XACT_EVENT_PRE_COMMIT, before anyone
+ *     can see the change, and again at COMMIT (or ABORT).  Between the two,
+ *     the table is "in flight": readers neither use nor save results that
+ *     read it.  (PART 6)
+ *
  * IMPORTANT LIMITS OF THIS VERSION
  *   - The saved results themselves are still private to each connection
  *     (each connection fills its own cache).  Moving them into shared
  *     memory is step 3.
- *   - A commit becomes visible to other connections a moment BEFORE our
- *     transaction callback bumps the counters.  In that short window another
- *     connection can still get the old result.  Step 2 closes it.
  *   - Only plain SELECTs sent directly by the client are cached (not queries
  *     inside functions, not prepared statements with parameters).
  *
@@ -308,7 +313,8 @@ static Size cache_size_bytes = 0;	/* total size of all saved results */
 /*
  * What lives in shared memory: one block, the same for every connection.
  * For now it holds only the version counters (VERSION_SLOTS of them, 512 kB;
- * counter 0 is the epoch).  Step 3 adds the saved results.
+ * counter 0 is the epoch) and the in-flight counts (256 kB).  Step 3 adds
+ * the saved results.
  *
  * pg_atomic_uint64 is a 64-bit number that many processes can update at the
  * same time without a lock: pg_atomic_fetch_add_u64() adds to it as one
@@ -317,13 +323,18 @@ static Size cache_size_bytes = 0;	/* total size of all saved results */
 typedef struct QcacheShared
 {
 	pg_atomic_uint64 version[VERSION_SLOTS];
+	pg_atomic_uint32 inflight[VERSION_SLOTS];	/* commits in progress */
 } QcacheShared;
 
 /* Points into shared memory; set by qcache_shmem_startup(). */
 static QcacheShared *shared = NULL;
 
-/* Read and bump one counter. */
-#define VERSION(slot)		pg_atomic_read_u64(&shared->version[(slot)])
+/*
+ * Read and bump one counter.  The reads are full memory barriers, so a
+ * reader never sees an old version together with a new in-flight count.
+ */
+#define VERSION(slot)		pg_atomic_read_membarrier_u64(&shared->version[(slot)])
+#define INFLIGHT(slot)		pg_atomic_read_membarrier_u32(&shared->inflight[(slot)])
 #define BUMP_VERSION(slot)	pg_atomic_fetch_add_u64(&shared->version[(slot)], 1)
 
 static CurrentQuery current;	/* the SELECT running now (zeroed if none) */
@@ -345,6 +356,7 @@ static uint64 plan_just_made_epoch = 0;
 /* What the current transaction changed; acted on at COMMIT. */
 static List *tables_written = NIL;	/* list of table OIDs */
 static bool structure_changed = false;	/* ALTER, TRUNCATE, COPY, ... */
+static bool precommit_done = false;	/* we bumped at PRE_COMMIT */
 
 /* Counters shown by qcache_stats(). */
 static uint64 count_hits = 0;
@@ -386,17 +398,19 @@ table_slot(Oid table_oid)
 }
 
 /*
- * Are the tables still at the versions in the list, and the epoch unchanged?
- * If yes, a result computed at those versions is still correct.
+ * Are the tables still at the versions in the list, the epoch unchanged,
+ * and no commit to any of them in progress?  If yes, a result computed at
+ * those versions is still correct.
  */
 static bool
 versions_unchanged(const TableVersion *tables, int num_tables, uint64 epoch)
 {
-	if (VERSION(EPOCH_SLOT) != epoch)
+	if (INFLIGHT(EPOCH_SLOT) != 0 || VERSION(EPOCH_SLOT) != epoch)
 		return false;
 	for (int i = 0; i < num_tables; i++)
 	{
-		if (VERSION(tables[i].slot) != tables[i].version)
+		if (INFLIGHT(tables[i].slot) != 0 ||
+			VERSION(tables[i].slot) != tables[i].version)
 			return false;
 	}
 	return true;
@@ -516,6 +530,8 @@ record_table_versions(PlannedStmt *plan)
 	int			n = 0;
 
 	plan_just_made_epoch = VERSION(EPOCH_SLOT);
+	if (INFLIGHT(EPOCH_SLOT) != 0)
+		return "a commit is in progress";
 
 	foreach(cell, plan->rtable)
 	{
@@ -540,6 +556,8 @@ record_table_versions(PlannedStmt *plan)
 		plan_just_made_tables[n].oid = table->relid;
 		plan_just_made_tables[n].slot = table_slot(table->relid);
 		plan_just_made_tables[n].version = VERSION(plan_just_made_tables[n].slot);
+		if (INFLIGHT(plan_just_made_tables[n].slot) != 0)
+			return "a commit is in progress";
 		n++;
 	}
 	plan_just_made_num_tables = n;
@@ -1335,28 +1353,65 @@ qcache_ProcessUtility_hook(PlannedStmt *plan, const char *query_string,
  * cost of a COMMIT therefore no longer grows with the number of saved
  * results (it used to scan all of them).
  *
- * Note for the shared cache (step 2): PostgreSQL makes a commit visible to
- * other connections BEFORE it calls us with XACT_EVENT_COMMIT.  The shared
- * version must therefore also bump at XACT_EVENT_PRE_COMMIT.
+ * PostgreSQL makes a commit visible to other connections BEFORE it calls us
+ * with XACT_EVENT_COMMIT.  So we also bump at XACT_EVENT_PRE_COMMIT, and mark
+ * the tables "in flight" until COMMIT or ABORT:
+ *
+ *   PRE_COMMIT:     inflight++, version++   (old results stop being used)
+ *   (commit becomes visible to others)
+ *   COMMIT / ABORT: version++, inflight--   (a result saved while in
+ *                                            flight never looks current)
  * ====================================================================== */
+
+/* Bump the versions of everything this transaction wrote. */
+static void
+bump_written_versions(int inflight_change)
+{
+	ListCell   *cell;
+
+	foreach(cell, tables_written)
+	{
+		uint32		slot = table_slot(lfirst_oid(cell));
+
+		if (inflight_change > 0)
+			pg_atomic_fetch_add_u32(&shared->inflight[slot], 1);
+		BUMP_VERSION(slot);
+		if (inflight_change < 0)
+			pg_atomic_fetch_sub_u32(&shared->inflight[slot], 1);
+	}
+	if (structure_changed)
+	{
+		if (inflight_change > 0)
+			pg_atomic_fetch_add_u32(&shared->inflight[EPOCH_SLOT], 1);
+		BUMP_VERSION(EPOCH_SLOT);
+		if (inflight_change < 0)
+			pg_atomic_fetch_sub_u32(&shared->inflight[EPOCH_SLOT], 1);
+	}
+}
 
 static void
 qcache_transaction_callback(XactEvent event, void *arg)
 {
-	ListCell   *cell;
-
 	switch (event)
 	{
+		case XACT_EVENT_PRE_COMMIT:
+			/* Before the commit becomes visible: old results stop counting. */
+			bump_written_versions(+1);
+			precommit_done = true;
+			break;
+
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PREPARE:
 			/*
 			 * The changes are now permanent: make old results out of date,
-			 * in every connection (the counters are shared).
+			 * in every connection (the counters are shared), and end the
+			 * in-flight state.
 			 */
-			foreach(cell, tables_written)
-				BUMP_VERSION(table_slot(lfirst_oid(cell)));
-			if (structure_changed)
-				BUMP_VERSION(EPOCH_SLOT);
+			if (precommit_done)
+				bump_written_versions(-1);
+			else
+				bump_written_versions(0);	/* PREPARE has no PRE_COMMIT */
+			precommit_done = false;
 
 			if (structure_changed)
 				DEBUG_MSG("qcache: COMMIT: every saved result is now out of date");
@@ -1371,6 +1426,9 @@ qcache_transaction_callback(XactEvent event, void *arg)
 
 		case XACT_EVENT_ABORT:
 			/* ROLLBACK or an error: the data did not change, keep the cache. */
+			if (precommit_done)
+				bump_written_versions(-1);	/* failed after PRE_COMMIT */
+			precommit_done = false;
 			forget_transaction_changes();
 			forget_current_query();
 			plan_just_made = NULL;
@@ -1492,7 +1550,10 @@ qcache_shmem_startup(void)
 	if (!found)
 	{
 		for (int i = 0; i < VERSION_SLOTS; i++)
+		{
 			pg_atomic_init_u64(&shared->version[i], 0);
+			pg_atomic_init_u32(&shared->inflight[i], 0);
+		}
 	}
 	LWLockRelease(AddinShmemInitLock);
 }

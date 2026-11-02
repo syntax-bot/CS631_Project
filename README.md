@@ -5,8 +5,9 @@ arrives again, sends the saved rows to the client without executing it.
 A saved result is thrown away when a transaction that wrote to one of its
 tables commits.
 
-This is the checkpoint-1 version: one cache per connection, kept in that
-connection's own memory. Written for PostgreSQL 18 (tested on 18.6).
+This is the checkpoint-2 version: table version counters are shared by all
+connections; each connection still keeps its own saved results.
+Written for PostgreSQL 18 (tested on 18.6).
 The code is written to be read by beginners: start at the comment at the
 top of `qcache.c`.
 
@@ -146,15 +147,15 @@ or `COPY` clears the whole cache at commit.
   Prepared statements and parameterized queries are not cached.
 - A hit still pays for parsing, planning and executor startup.
 
-## Checkpoint 2: shared table versions (in progress)
+## Checkpoint 2: shared table versions
 
-Each table maps to one slot in a fixed shared-memory array of atomic version
-counters (step 1). A committing write bumps the versions of the tables it
-wrote, so it makes the saved results of every connection out of date
-(`specs/qcache_cross.spec`). Readers take their version snapshot in the
-planner, before the query snapshot is created. A cached result is used or
-saved only when every recorded version is unchanged.
+Each table maps to one slot in a fixed shared-memory array. A writing
+transaction marks its slots and bumps each version before its commit becomes
+visible, then bumps again and clears the in-flight marker after commit or
+abort. Readers take their version snapshot in the planner, before the query
+snapshot is created. A cached result is used or saved only when every recorded
+version is unchanged and no commit is in progress.
 
-Still open: PostgreSQL makes a commit visible to other connections a moment
-before our COMMIT callback runs. In that window another connection can still
-get the old result.
+This closes the stale-read window between a commit becoming visible and the
+cache noticing it. An abort also clears its in-flight markers, so later
+queries are not permanently bypassed.
