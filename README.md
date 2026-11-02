@@ -142,23 +142,19 @@ or `COPY` clears the whole cache at commit.
 
 ## Known limits of this version
 
-- **Writes from other connections are not seen.** Each connection has its
-  own cache, so if connection A caches a result and connection B updates
-  the table, A keeps returning the old result. Demonstrate it with two
-  psql windows. This is what the shared-memory design in the second half
-  fixes.
 - Only the simple query protocol benefits (psql, `pgbench -M simple`).
   Prepared statements and parameterized queries are not cached.
 - A hit still pays for parsing, planning and executor startup.
 
 ## Checkpoint 2: shared table versions (in progress)
 
-Step 0, still inside each connection: each table maps to one slot in a fixed
-array of version counters. A committing write only bumps the versions of the
-tables it wrote; it no longer scans the cache, so a commit costs the same
-however many results are saved (`bench/commit_cost.sh`). Readers take their
-version snapshot in the planner, before the query snapshot is created. A
-cached result is used or saved only when every recorded version is
-unchanged. Each saved result is now one block of memory without pointers
-(`bench/mem_check.sh`), and the key also holds the database and the settings
-that change what a query means (`DateStyle`, `TimeZone`, `search_path`, ...).
+Each table maps to one slot in a fixed shared-memory array of atomic version
+counters (step 1). A committing write bumps the versions of the tables it
+wrote, so it makes the saved results of every connection out of date
+(`specs/qcache_cross.spec`). Readers take their version snapshot in the
+planner, before the query snapshot is created. A cached result is used or
+saved only when every recorded version is unchanged.
+
+Still open: PostgreSQL makes a commit visible to other connections a moment
+before our COMMIT callback runs. In that window another connection can still
+get the old result.

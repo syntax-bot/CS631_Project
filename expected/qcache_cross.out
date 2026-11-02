@@ -1,0 +1,120 @@
+Parsed test spec with 2 sessions
+
+starting permutation: r_read r_read w_update r_read r_stats
+qcache_reset
+------------
+            
+(1 row)
+
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step w_update: UPDATE acc SET v = v + 1 WHERE id = 1;
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+101
+(1 row)
+
+step r_stats: SELECT hits, misses, invalidations FROM qcache_stats();
+hits|misses|invalidations
+----+------+-------------
+   1|     2|            1
+(1 row)
+
+
+starting permutation: r_read w_begin w_update r_read w_commit r_read r_stats
+qcache_reset
+------------
+            
+(1 row)
+
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step w_begin: BEGIN;
+step w_update: UPDATE acc SET v = v + 1 WHERE id = 1;
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step w_commit: COMMIT;
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+101
+(1 row)
+
+step r_stats: SELECT hits, misses, invalidations FROM qcache_stats();
+hits|misses|invalidations
+----+------+-------------
+   1|     2|            1
+(1 row)
+
+
+starting permutation: r_read w_begin w_update w_rollback r_read r_stats
+qcache_reset
+------------
+            
+(1 row)
+
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step w_begin: BEGIN;
+step w_update: UPDATE acc SET v = v + 1 WHERE id = 1;
+step w_rollback: ROLLBACK;
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step r_stats: SELECT hits, misses, invalidations FROM qcache_stats();
+hits|misses|invalidations
+----+------+-------------
+   1|     1|            0
+(1 row)
+
+
+starting permutation: r_read w_truncate r_read r_stats
+qcache_reset
+------------
+            
+(1 row)
+
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step w_truncate: TRUNCATE acc;
+step r_read: SELECT v FROM acc WHERE id = 1;
+v
+-
+(0 rows)
+
+step r_stats: SELECT hits, misses, invalidations FROM qcache_stats();
+hits|misses|invalidations
+----+------+-------------
+   0|     2|            1
+(1 row)
+
