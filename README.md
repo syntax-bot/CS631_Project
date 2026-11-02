@@ -5,6 +5,11 @@ arrives again, sends the saved rows to the client without executing it.
 A saved result is thrown away when a transaction that wrote to one of its
 tables commits.
 
+This is the checkpoint-1 version: one cache per connection, kept in that
+connection's own memory. Written for PostgreSQL 18 (tested on 18.6).
+The code is written to be read by beginners: start at the comment at the
+top of `qcache.c`.
+
 ## Files
 
 | File | What it is |
@@ -145,3 +150,15 @@ or `COPY` clears the whole cache at commit.
 - Only the simple query protocol benefits (psql, `pgbench -M simple`).
   Prepared statements and parameterized queries are not cached.
 - A hit still pays for parsing, planning and executor startup.
+
+## Checkpoint 2: shared table versions (in progress)
+
+Step 0, still inside each connection: each table maps to one slot in a fixed
+array of version counters. A committing write only bumps the versions of the
+tables it wrote; it no longer scans the cache, so a commit costs the same
+however many results are saved (`bench/commit_cost.sh`). Readers take their
+version snapshot in the planner, before the query snapshot is created. A
+cached result is used or saved only when every recorded version is
+unchanged. Each saved result is now one block of memory without pointers
+(`bench/mem_check.sh`), and the key also holds the database and the settings
+that change what a query means (`DateStyle`, `TimeZone`, `search_path`, ...).
