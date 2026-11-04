@@ -5,8 +5,8 @@ arrives again, sends the saved rows to the client without executing it.
 A saved result is thrown away when a transaction that wrote to one of its
 tables commits.
 
-This is the checkpoint-2 version: table version counters are shared by all
-connections; each connection still keeps its own saved results.
+This is the checkpoint-3 version: cached results, locks, and table version
+counters are shared by all connections.
 Written for PostgreSQL 18 (tested on 18.6).
 The code is written to be read by beginners: start at the comment at the
 top of `qcache.c`.
@@ -95,10 +95,11 @@ SET qcache.debug = on;            -- print a message at every step
 | --- | --- | --- |
 | `qcache.enabled` | `on` | Use and fill the cache |
 | `qcache.debug` | `off` | Print a NOTICE at every step (hit, miss, saved, invalidated, why not cached) |
-| `qcache.max_size` | `64MB` | Memory for cached results, per connection |
+| `qcache.max_size` | `64MB` | Shared memory reserved for cached results; restart required |
 | `qcache.max_result_size` | `1MB` | Larger results are not cached |
+| `qcache.max_entries` | `65536` | Maximum entries across the shared hash tables; restart required |
 
-All counters and entries belong to the current connection.
+Counters and entries are shared by all connections.
 
 ## Demo and benchmark
 
@@ -159,3 +160,20 @@ version is unchanged and no commit is in progress.
 This closes the stale-read window between a commit becoming visible and the
 cache noticing it. An abort also clears its in-flight markers, so later
 queries are not permanently bypassed.
+
+## Checkpoint 3: one shared cache
+
+The cache is now shared by all PostgreSQL connections. At server startup,
+qcache reserves one fixed shared-memory region: one hash table, one LRU list
+and one free list of chunks, protected by one lock.
+
+Results are stored as a chain of fixed-size shared-memory chunks. A cache hit
+takes the lock, copies the result into the requesting connection's temporary
+memory, and releases the lock before sending rows to the client, so no lock
+is held during client output.
+
+The lock is taken exclusively even by a hit, because a hit moves its entry to
+the front of the LRU list. So readers wait for each other; this is the next
+thing to fix (it is the global-lock problem of MySQL's query cache). The
+shared settings `qcache.max_size` and `qcache.max_entries` are postmaster
+settings and require a restart.
