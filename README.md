@@ -97,6 +97,7 @@ SET qcache.debug = on;            -- print a message at every step
 | `qcache.debug` | `off` | Print a NOTICE at every step (hit, miss, saved, invalidated, why not cached) |
 | `qcache.max_size` | `64MB` | Shared memory reserved for cached results; restart required |
 | `qcache.max_result_size` | `1MB` | Larger results are not cached |
+| `qcache.partitions` | `32` | Number of independently locked shared partitions; restart required |
 | `qcache.max_entries` | `65536` | Maximum entries across the shared hash tables; restart required |
 
 Counters and entries are shared by all connections.
@@ -164,16 +165,18 @@ queries are not permanently bypassed.
 ## Checkpoint 3: one shared cache
 
 The cache is now shared by all PostgreSQL connections. At server startup,
-qcache reserves one fixed shared-memory region: one hash table, one LRU list
-and one free list of chunks, protected by one lock.
+qcache reserves one fixed shared-memory region. It is divided into
+`qcache.partitions` independent partitions; each partition has its own lock,
+hash table, LRU list, and chunk free list.
 
 Results are stored as a chain of fixed-size shared-memory chunks. A cache hit
-takes the lock, copies the result into the requesting connection's temporary
-memory, and releases the lock before sending rows to the client, so no lock
-is held during client output.
+takes its partition's shared lock, copies the result into the requesting
+connection's temporary memory, and releases the lock before sending rows to
+the client. This means multiple readers can use a partition at the same time
+and no lock is held during client output.
 
-The lock is taken exclusively even by a hit, because a hit moves its entry to
-the front of the LRU list. So readers wait for each other; this is the next
-thing to fix (it is the global-lock problem of MySQL's query cache). The
-shared settings `qcache.max_size` and `qcache.max_entries` are postmaster
-settings and require a restart.
+Saving a result takes the partition's exclusive lock. If the partition is
+full, qcache uses a second-chance eviction rule: recently referenced entries
+are given another chance, while unreferenced entries are removed. The shared
+settings `qcache.max_size`, `qcache.partitions`, and `qcache.max_entries` are
+postmaster settings and require a restart.

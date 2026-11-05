@@ -90,8 +90,10 @@ static int	setting_max_result_kb = 1024;	/* qcache.max_result_size: 1 MB */
 #define MAX_TABLES 8
 #define VERSION_SLOTS 65536
 #define EPOCH_SLOT 0
+#define QC_MAX_PARTITIONS 32
 #define QC_CHUNK_SIZE 8192
 #define QC_MAX_ENTRIES 65536
+static int setting_partitions = QC_MAX_PARTITIONS;
 static int setting_max_entries = QC_MAX_ENTRIES;
 
 static const char *const key_settings[] ={
@@ -154,22 +156,19 @@ typedef struct CachedResult
 	TableVersion tables[MAX_TABLES];
 	uint64 epoch;
 
+	pg_atomic_uint32 referenced;
 	pg_atomic_uint64 hits;
 	dlist_node	lru_link;		/* position in the "recently used" list */
 } CachedResult;
 
-/*
- * The shared store: one lock protects the hash table, the LRU list and the
- * free list of chunks.
- */
-typedef struct QcStore
+typedef struct QcPartition
 {
 	LWLock *lock;
 	dlist_head lru;
 	QcChunk *free;
 	uint32 nfree;
 	uint64 bytes_used;
-} QcStore;
+} QcPartition;
 
 /*
  * The SELECT that is running right now, if we may cache it.
@@ -217,16 +216,16 @@ typedef struct RowCollector
 /* ======================================================================
  * PART C. GLOBAL VARIABLES
  *
- * The cache entries live in shared memory.  Each backend keeps only a local
- * handle for the shared hash table and temporary state for its query.
+ * The cache entries live in shared memory.  Each backend keeps only local
+ * handles for the shared hash tables and temporary state for its query.
  * ====================================================================== */
 
 static MemoryContext cache_memory = NULL;	/* parent of current-query state */
-static HTAB *result_hash = NULL;	/* local handle for the shared hash */
+static HTAB *part_hash[QC_MAX_PARTITIONS];	/* local handles for shared hashes */
 typedef struct QcacheShared{
 	pg_atomic_uint64 version[VERSION_SLOTS];
 	pg_atomic_uint32 inflight[VERSION_SLOTS];
-	QcStore store;
+	QcPartition parts[QC_MAX_PARTITIONS];
 	pg_atomic_uint64 hits;
 	pg_atomic_uint64 misses;
 	pg_atomic_uint64 stores;
@@ -298,6 +297,12 @@ static bool versions_unchanged(const TableVersion *tables, int num_tables, uint6
 	return true;
 }
 
+static int
+partition_index(uint64 key_hash)
+{
+	return key_hash % setting_partitions;
+}
+
 static char
 entry_byte(const CachedResult *entry, Size position)
 {
@@ -347,7 +352,7 @@ copy_entry_block(const CachedResult *entry, char *destination)
 }
 
 static void
-free_entry_chunks(QcStore *store, CachedResult *entry)
+free_entry_chunks(QcPartition *partition, CachedResult *entry)
 {
 	QcChunk *chunk = entry->first;
 
@@ -355,30 +360,30 @@ free_entry_chunks(QcStore *store, CachedResult *entry)
 	{
 		QcChunk *next = chunk->next;
 
-		chunk->next = store->free;
-		store->free = chunk;
-		store->nfree++;
+		chunk->next = partition->free;
+		partition->free = chunk;
+		partition->nfree++;
 		chunk = next;
 	}
 	entry->first = NULL;
 }
 
 static bool
-allocate_entry_chunks(QcStore *store, CachedResult *entry, Size block_len)
+allocate_entry_chunks(QcPartition *partition, CachedResult *entry, Size block_len)
 {
 	QcChunk *last = NULL;
 	Size needed = (block_len + QC_CHUNK_DATA - 1) / QC_CHUNK_DATA;
 
-	if (needed > store->nfree)
+	if (needed > partition->nfree)
 		return false;
 
 	entry->first = NULL;
 	for (Size i = 0; i < needed; i++)
 	{
-		QcChunk *chunk = store->free;
+		QcChunk *chunk = partition->free;
 
-		store->free = chunk->next;
-		store->nfree--;
+		partition->free = chunk->next;
+		partition->nfree--;
 		chunk->next = NULL;
 		if (last == NULL)
 			entry->first = chunk;
@@ -390,14 +395,14 @@ allocate_entry_chunks(QcStore *store, CachedResult *entry, Size block_len)
 }
 
 static void
-remove_cached_result(QcStore *store, CachedResult *entry, bool count_invalidation)
+remove_cached_result(QcPartition *partition, CachedResult *entry, bool count_invalidation)
 {
 	uint64 key_hash = entry->key_hash;
 
 	dlist_delete(&entry->lru_link);
-	store->bytes_used -= entry->block_len;
-	free_entry_chunks(store, entry);
-	hash_search(result_hash, &key_hash, HASH_REMOVE, NULL);
+	partition->bytes_used -= entry->block_len;
+	free_entry_chunks(partition, entry);
+	hash_search(part_hash[partition - shared->parts], &key_hash, HASH_REMOVE, NULL);
 	if (count_invalidation)
 		pg_atomic_fetch_add_u64(&shared->invalidations, 1);
 }
@@ -405,16 +410,19 @@ remove_cached_result(QcStore *store, CachedResult *entry, bool count_invalidatio
 static void
 remove_all_cached_results(void)
 {
-	QcStore *store = &shared->store;
-
-	LWLockAcquire(store->lock, LW_EXCLUSIVE);
-	while (!dlist_is_empty(&store->lru))
+	for (int i = 0; i < setting_partitions; i++)
 	{
-		CachedResult *entry =
-			dlist_tail_element(CachedResult, lru_link, &store->lru);
-		remove_cached_result(store, entry, false);
+		QcPartition *partition = &shared->parts[i];
+
+		LWLockAcquire(partition->lock, LW_EXCLUSIVE);
+		while (!dlist_is_empty(&partition->lru))
+		{
+			CachedResult *entry =
+				dlist_tail_element(CachedResult, lru_link, &partition->lru);
+			remove_cached_result(partition, entry, false);
+		}
+		LWLockRelease(partition->lock);
 	}
-	LWLockRelease(store->lock);
 }
 
 /* Forget the current query and free its memory. */
@@ -918,7 +926,8 @@ save_result(RowCollector *collector)
 	char	   *block;
 	ResultHeader *header;
 	CachedResult *entry;
-	QcStore *store = &shared->store;
+	QcPartition *partition;
+	int partition_no;
 	bool		found;
 
 	if (collector->too_big || collector->block == NULL)
@@ -947,38 +956,50 @@ save_result(RowCollector *collector)
 		return;
 	}
 
+	partition_no = partition_index(current.key_hash);
+	partition = &shared->parts[partition_no];
+	if (block_len > max_size / setting_partitions)
+	{
+		DEBUG_MSG("qcache: result does not fit in its partition; not saved");
+		return;
+	}
+
 	block = MemoryContextAlloc(current.memory, block_len);
 	memcpy(block, collector->block, collector->used);
 	memcpy(block + rows_len, current.key, current.key_len);
 	memcpy(block + rows_len + current.key_len, current.query_text, text_len);
 
-	/* Make room: evict the least recently used results. */
-	LWLockAcquire(store->lock, LW_EXCLUSIVE);
-	while (store->bytes_used + block_len > max_size &&
-		   !dlist_is_empty(&store->lru))
+	LWLockAcquire(partition->lock, LW_EXCLUSIVE);
+	while (partition->bytes_used + block_len > max_size / setting_partitions &&
+		   !dlist_is_empty(&partition->lru))
 	{
 		CachedResult *oldest =
-			dlist_tail_element(CachedResult, lru_link, &store->lru);
+			dlist_tail_element(CachedResult, lru_link, &partition->lru);
 
-		remove_cached_result(store, oldest, false);
-		pg_atomic_fetch_add_u64(&shared->evictions, 1);
+		if (pg_atomic_exchange_u32(&oldest->referenced, 0) != 0)
+			dlist_move_head(&partition->lru, &oldest->lru_link);
+		else
+		{
+			remove_cached_result(partition, oldest, false);
+			pg_atomic_fetch_add_u64(&shared->evictions, 1);
+		}
 	}
 
 	/* Add an entry to the shared hash table. */
-	entry = (CachedResult *) hash_search(result_hash,
+	entry = (CachedResult *) hash_search(part_hash[partition_no],
 										 &current.key_hash,
 										 HASH_ENTER_NULL, &found);
 	if (entry == NULL)
 	{
-		LWLockRelease(store->lock);
-		DEBUG_MSG("qcache: shared hash table is full; not saved");
+		LWLockRelease(partition->lock);
+		DEBUG_MSG("qcache: partition hash table is full; not saved");
 		return;
 	}
 	if (found)
 	{
 		dlist_delete(&entry->lru_link);
-		store->bytes_used -= entry->block_len;
-		free_entry_chunks(store, entry);
+		partition->bytes_used -= entry->block_len;
+		free_entry_chunks(partition, entry);
 	}
 
 	memset(entry, 0, sizeof(*entry));
@@ -986,10 +1007,10 @@ save_result(RowCollector *collector)
 	entry->query_text_len = text_len;
 	entry->block_len = block_len;
 	entry->key_hash = current.key_hash;
-	if (!allocate_entry_chunks(store, entry, block_len))
+	if (!allocate_entry_chunks(partition, entry, block_len))
 	{
-		hash_search(result_hash, &current.key_hash, HASH_REMOVE, NULL);
-		LWLockRelease(store->lock);
+		hash_search(part_hash[partition_no], &current.key_hash, HASH_REMOVE, NULL);
+		LWLockRelease(partition->lock);
 		DEBUG_MSG("qcache: shared arena is full; not saved");
 		return;
 	}
@@ -1010,12 +1031,13 @@ save_result(RowCollector *collector)
 	entry->num_tables = current.num_tables;
 	memcpy(entry->tables, current.tables, sizeof(TableVersion) * current.num_tables);
 	entry->epoch = current.epoch;
+	pg_atomic_init_u32(&entry->referenced, 0);
 	pg_atomic_init_u64(&entry->hits, 0);
 
-	dlist_push_head(&store->lru, &entry->lru_link);
-	store->bytes_used += block_len;
+	dlist_push_head(&partition->lru, &entry->lru_link);
+	partition->bytes_used += block_len;
 	pg_atomic_fetch_add_u64(&shared->stores, 1);
-	LWLockRelease(store->lock);
+	LWLockRelease(partition->lock);
 
 	DEBUG_MSG("qcache: saved %llu row(s), %zu bytes",
 			  (unsigned long long) header->num_rows, block_len);
@@ -1087,17 +1109,14 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 
 	if (use_cache)
 	{
-		QcStore *store = &shared->store;
+		int partition_no = partition_index(current.key_hash);
+		QcPartition *partition = &shared->parts[partition_no];
 		CachedResult *entry;
 		bool hit = false;
 		bool stale = false;
 
-		/*
-		 * Exclusive, because a hit moves the entry to the front of the LRU
-		 * list.  The copy is made under the lock; rows are sent after.
-		 */
-		LWLockAcquire(store->lock, LW_EXCLUSIVE);
-		entry = (CachedResult *) hash_search(result_hash,
+		LWLockAcquire(partition->lock, LW_SHARED);
+		entry = (CachedResult *) hash_search(part_hash[partition_no],
 											 &current.key_hash,
 											 HASH_FIND, NULL);
 		if (entry != NULL && entry_key_matches(entry, current.key, current.key_len) &&
@@ -1112,22 +1131,30 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 			hit = same_columns(result, query_desc->tupDesc);
 			if (hit)
 			{
-				dlist_move_head(&store->lru, &entry->lru_link);
+				pg_atomic_write_u32(&entry->referenced, 1);
 				pg_atomic_fetch_add_u64(&entry->hits, 1);
 				pg_atomic_fetch_add_u64(&shared->hits, 1);
 			}
 		}
 		else if (entry != NULL &&
 				 entry_key_matches(entry, current.key, current.key_len))
-		{
-			/* Out of date: we hold the lock exclusively, remove it now. */
-			remove_cached_result(store, entry, true);
 			stale = true;
-		}
-		LWLockRelease(store->lock);
+		LWLockRelease(partition->lock);
 
 		if (stale)
-			DEBUG_MSG("qcache: saved result is out of date (a table it read has changed); removed");
+		{
+			DEBUG_MSG("qcache: saved result is out of date (a table it read has changed)");
+			LWLockAcquire(partition->lock, LW_EXCLUSIVE);
+			entry = (CachedResult *) hash_search(part_hash[partition_no],
+												 &current.key_hash,
+												 HASH_FIND, NULL);
+			if (entry != NULL &&
+				entry_key_matches(entry, current.key, current.key_len) &&
+				!versions_unchanged(entry->tables, entry->num_tables,
+									entry->epoch))
+				remove_cached_result(partition, entry, true);
+			LWLockRelease(partition->lock);
+		}
 
 		if (hit)
 		{
@@ -1393,10 +1420,15 @@ qcache_stats(PG_FUNCTION_ARGS)
 	if (get_call_result_type(fcinfo, NULL, &result_columns) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
 
-	LWLockAcquire(shared->store.lock, LW_SHARED);
-	entries = hash_get_num_entries(result_hash);
-	bytes = shared->store.bytes_used;
-	LWLockRelease(shared->store.lock);
+	for (int i = 0; i < setting_partitions; i++)
+	{
+		QcPartition *partition = &shared->parts[i];
+
+		LWLockAcquire(partition->lock, LW_SHARED);
+		entries += hash_get_num_entries(part_hash[i]);
+		bytes += partition->bytes_used;
+		LWLockRelease(partition->lock);
+	}
 
 	values[0] = Int64GetDatum(entries);
 	values[1] = Int64GetDatum(bytes);
@@ -1417,12 +1449,13 @@ qcache_entries(PG_FUNCTION_ARGS)
 	/* Prepare to return many rows at once. */
 	InitMaterializedSRF(fcinfo, 0);
 
+	for (int i = 0; i < setting_partitions; i++)
 	{
-		QcStore *store = &shared->store;
+		QcPartition *partition = &shared->parts[i];
 		dlist_iter iter;
 
-		LWLockAcquire(store->lock, LW_SHARED);
-		dlist_foreach(iter, &store->lru)
+		LWLockAcquire(partition->lock, LW_SHARED);
+		dlist_foreach(iter, &partition->lru)
 		{
 			CachedResult *entry =
 				dlist_container(CachedResult, lru_link, iter.cur);
@@ -1441,7 +1474,7 @@ qcache_entries(PG_FUNCTION_ARGS)
 			values[3] = Int64GetDatum((int64) pg_atomic_read_u64(&entry->hits));
 			tuplestore_putvalues(result->setResult, result->setDesc, values, nulls);
 		}
-		LWLockRelease(store->lock);
+		LWLockRelease(partition->lock);
 	}
 	return (Datum) 0;
 }
@@ -1478,7 +1511,15 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static Size
 qcache_hash_size(void)
 {
-	return hash_estimate_size(setting_max_entries, sizeof(CachedResult));
+	int entries_per_partition =
+		Max(1, (setting_max_entries + setting_partitions - 1) /
+			setting_partitions);
+	Size total = 0;
+
+	for (int i = 0; i < setting_partitions; i++)
+		total = add_size(total, hash_estimate_size(entries_per_partition,
+												   sizeof(CachedResult)));
+	return total;
 }
 
 static void
@@ -1492,7 +1533,7 @@ qcache_shmem_request(void)
 	if (prev_shmem_request_hook != NULL)
 		prev_shmem_request_hook();
 	RequestAddinShmemSpace(add_size(size, qcache_hash_size()));
-	RequestNamedLWLockTranche("qcache", 1);
+	RequestNamedLWLockTranche("qcache", setting_partitions);
 }
 
 static void
@@ -1506,7 +1547,8 @@ qcache_shmem_startup(void)
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	shared = ShmemInitStruct("qcache state", sizeof(QcacheShared), &found);
 	locks = GetNamedLWLockTranche("qcache");
-	shared->store.lock = &locks[0].lock;
+	for (int i = 0; i < setting_partitions; i++)
+		shared->parts[i].lock = &locks[i].lock;
 
 	if(!found){
 		for(int i = 0; i < VERSION_SLOTS; i++){
@@ -1518,36 +1560,52 @@ qcache_shmem_startup(void)
 		pg_atomic_init_u64(&shared->stores, 0);
 		pg_atomic_init_u64(&shared->invalidations, 0);
 		pg_atomic_init_u64(&shared->evictions, 0);
-		dlist_init(&shared->store.lru);
-		shared->store.free = NULL;
-		shared->store.nfree = 0;
-		shared->store.bytes_used = 0;
+		for (int i = 0; i < setting_partitions; i++)
+		{
+			dlist_init(&shared->parts[i].lru);
+			shared->parts[i].free = NULL;
+			shared->parts[i].nfree = 0;
+			shared->parts[i].bytes_used = 0;
+		}
 	}
 
+	for (int i = 0; i < setting_partitions; i++)
 	{
 		HASHCTL ctl;
+		int entries_per_partition =
+			Max(1, (setting_max_entries + setting_partitions - 1) /
+				setting_partitions);
+		char name[32];
 
 		memset(&ctl, 0, sizeof(ctl));
 		ctl.keysize = sizeof(uint64);
 		ctl.entrysize = sizeof(CachedResult);
-		result_hash = ShmemInitHash("qcache results", setting_max_entries,
-									setting_max_entries, &ctl,
-									HASH_ELEM | HASH_BLOBS);
+		snprintf(name, sizeof(name), "qcache part %d", i);
+		part_hash[i] = ShmemInitHash(name, entries_per_partition,
+									 entries_per_partition, &ctl,
+									 HASH_ELEM | HASH_BLOBS);
 	}
 
 	if (!found)
 	{
 		Size chunks = ((Size) setting_max_size_kb * 1024 + QC_CHUNK_DATA - 1) /
 			QC_CHUNK_DATA;
+		Size chunks_per_partition = chunks / setting_partitions;
 		QcChunk *all_chunks = ShmemAlloc(chunks * sizeof(QcChunk));
 
-		for (Size j = 0; j < chunks; j++)
+		for (int i = 0; i < setting_partitions; i++)
 		{
-			QcChunk *chunk = &all_chunks[j];
+			QcPartition *partition = &shared->parts[i];
 
-			chunk->next = shared->store.free;
-			shared->store.free = chunk;
-			shared->store.nfree++;
+			for (Size j = 0; j < chunks_per_partition; j++)
+			{
+				QcChunk *chunk =
+					&all_chunks[i * chunks_per_partition + j];
+
+				chunk->next = partition->free;
+				partition->free = chunk;
+				partition->nfree++;
+			}
 		}
 	}
 	LWLockRelease(AddinShmemInitLock);
@@ -1585,6 +1643,11 @@ void _PG_init(void){
 							"Largest single result that is cached.",
 							NULL, &setting_max_result_kb, 1024,
 							0, INT_MAX / 1024, PGC_USERSET, GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("qcache.partitions",
+							"Number of independent shared cache partitions.",
+							NULL, &setting_partitions, QC_MAX_PARTITIONS,
+							1, QC_MAX_PARTITIONS, PGC_POSTMASTER, 0,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("qcache.max_entries",
 							"Maximum number of shared cache entries.",
