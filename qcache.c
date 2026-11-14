@@ -66,6 +66,9 @@
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
+#include "catalog/pg_authid.h"
+#include "utils/acl.h"
+#include "utils/injection_point.h"
 
 /* The hook functions below are written for PostgreSQL 18. */
 #if PG_VERSION_NUM < 180000 || PG_VERSION_NUM >= 190000
@@ -91,10 +94,16 @@ static int	setting_max_result_kb = 1024;	/* qcache.max_result_size: 1 MB */
 #define VERSION_SLOTS 65536
 #define EPOCH_SLOT 0
 #define QC_MAX_PARTITIONS 32
-#define QC_CHUNK_SIZE 8192
+#define QC_CHUNK_SIZE 1024
 #define QC_MAX_ENTRIES 65536
 static int setting_partitions = QC_MAX_PARTITIONS;
 static int setting_max_entries = QC_MAX_ENTRIES;
+/*
+ * qcache.test_skip_precommit: FOR TESTS ONLY.  Skip the PRE_COMMIT bump and
+ * bump once at COMMIT, as step 1 did.  The race test uses it to show the
+ * stale read that the PRE_COMMIT bump prevents.
+ */
+static bool setting_test_skip_precommit = false;
 
 static const char *const key_settings[] ={
 	"DateStyle",
@@ -150,8 +159,11 @@ typedef struct CachedResult
 
 	QcChunk *first;
 	uint32 block_len;
+	uint32 nchunks;
 	uint32 key_len;
 	uint32 query_text_len;
+	Oid dbid;
+	Oid userid;
 	int16 num_tables;
 	TableVersion tables[MAX_TABLES];
 	uint64 epoch;
@@ -303,34 +315,62 @@ partition_index(uint64 key_hash)
 	return key_hash % setting_partitions;
 }
 
-static char
-entry_byte(const CachedResult *entry, Size position)
+/*
+ * Sizes derived from the settings.  qcache.max_size, qcache.partitions and
+ * qcache.max_entries can only change at server start, so every process
+ * computes the same values.
+ */
+static Size
+total_chunks(void)
 {
-	QcChunk *chunk = entry->first;
-	Size chunk_index;
+	return ((Size) setting_max_size_kb * 1024) / QC_CHUNK_SIZE;
+}
 
-	while (position >= QC_CHUNK_DATA)
-	{
-		chunk = chunk->next;
-		position -= QC_CHUNK_DATA;
-	}
-	chunk_index = position;
-	return chunk->data[chunk_index];
+static Size
+chunks_per_partition(void)
+{
+	return total_chunks() / setting_partitions;
+}
+
+static long
+entries_per_partition(void)
+{
+	return Max(1, (setting_max_entries + setting_partitions - 1) / setting_partitions);
+}
+
+/* How many chunks a block of this length needs. */
+static uint32
+chunks_for(Size block_len)
+{
+	return (block_len + QC_CHUNK_DATA - 1) / QC_CHUNK_DATA;
 }
 
 static bool
 entry_key_matches(const CachedResult *entry, const char *key, int key_len)
 {
-	Size key_offset;
+	QcChunk    *chunk = entry->first;
+	Size		offset;
+	Size		done = 0;
 
 	if (entry->key_len != (uint32) key_len)
 		return false;
 
-	key_offset = MAXALIGN((Size) ((ResultHeader *) entry->first->data)->total_len);
-	for (int i = 0; i < key_len; i++)
+	offset = MAXALIGN((Size) ((ResultHeader *) entry->first->data)->total_len);
+	while (offset >= QC_CHUNK_DATA)
 	{
-		if (entry_byte(entry, key_offset + i) != key[i])
+		chunk = chunk->next;
+		offset -= QC_CHUNK_DATA;
+	}
+
+	while (done < (Size) key_len)
+	{
+		Size		n = Min((Size) key_len - done, QC_CHUNK_DATA - offset);
+
+		if (memcmp(chunk->data + offset, key + done, n) != 0)
 			return false;
+		done += n;
+		offset = 0;
+		chunk = chunk->next;
 	}
 	return true;
 }
@@ -372,11 +412,12 @@ static bool
 allocate_entry_chunks(QcPartition *partition, CachedResult *entry, Size block_len)
 {
 	QcChunk *last = NULL;
-	Size needed = (block_len + QC_CHUNK_DATA - 1) / QC_CHUNK_DATA;
+	Size needed = chunks_for(block_len);
 
 	if (needed > partition->nfree)
 		return false;
 
+	entry->nchunks = needed;
 	entry->first = NULL;
 	for (Size i = 0; i < needed; i++)
 	{
@@ -400,7 +441,7 @@ remove_cached_result(QcPartition *partition, CachedResult *entry, bool count_inv
 	uint64 key_hash = entry->key_hash;
 
 	dlist_delete(&entry->lru_link);
-	partition->bytes_used -= entry->block_len;
+	partition->bytes_used -= (uint64) entry->nchunks * QC_CHUNK_SIZE;
 	free_entry_chunks(partition, entry);
 	hash_search(part_hash[partition - shared->parts], &key_hash, HASH_REMOVE, NULL);
 	if (count_invalidation)
@@ -923,6 +964,7 @@ save_result(RowCollector *collector)
 	Size		rows_len;
 	Size		text_len;
 	Size		block_len;
+	uint32		needed;
 	char	   *block;
 	ResultHeader *header;
 	CachedResult *entry;
@@ -935,6 +977,7 @@ save_result(RowCollector *collector)
 		DEBUG_MSG("qcache: result is larger than qcache.max_result_size; not saved");
 		return;
 	}
+
 	if (!versions_unchanged(current.tables, current.num_tables, current.epoch))
 	{
 		DEBUG_MSG("qcache: a table changed while the query ran; not saved");
@@ -950,19 +993,15 @@ save_result(RowCollector *collector)
 	rows_len = MAXALIGN(collector->used);
 	text_len = strlen(current.query_text) + 1;
 	block_len = rows_len + current.key_len + text_len;
-	if (block_len > max_size)
+	needed = chunks_for(block_len);
+	if (needed > chunks_per_partition())
 	{
-		DEBUG_MSG("qcache: result is larger than qcache.max_size; not saved");
+		DEBUG_MSG("qcache: result does not fit in its partition; not saved");
 		return;
 	}
 
 	partition_no = partition_index(current.key_hash);
 	partition = &shared->parts[partition_no];
-	if (block_len > max_size / setting_partitions)
-	{
-		DEBUG_MSG("qcache: result does not fit in its partition; not saved");
-		return;
-	}
 
 	block = MemoryContextAlloc(current.memory, block_len);
 	memcpy(block, collector->block, collector->used);
@@ -970,7 +1009,12 @@ save_result(RowCollector *collector)
 	memcpy(block + rows_len + current.key_len, current.query_text, text_len);
 
 	LWLockAcquire(partition->lock, LW_EXCLUSIVE);
-	while (partition->bytes_used + block_len > max_size / setting_partitions &&
+	entry = (CachedResult *) hash_search(part_hash[partition_no],
+										 &current.key_hash, HASH_FIND, NULL);
+	if (entry != NULL)
+		remove_cached_result(partition, entry, false);
+	while ((partition->nfree < needed ||
+			hash_get_num_entries(part_hash[partition_no]) >= entries_per_partition()) &&
 		   !dlist_is_empty(&partition->lru))
 	{
 		CachedResult *oldest =
@@ -995,18 +1039,14 @@ save_result(RowCollector *collector)
 		DEBUG_MSG("qcache: partition hash table is full; not saved");
 		return;
 	}
-	if (found)
-	{
-		dlist_delete(&entry->lru_link);
-		partition->bytes_used -= entry->block_len;
-		free_entry_chunks(partition, entry);
-	}
 
 	memset(entry, 0, sizeof(*entry));
 	entry->key_len = current.key_len;
 	entry->query_text_len = text_len;
 	entry->block_len = block_len;
 	entry->key_hash = current.key_hash;
+	entry->dbid = MyDatabaseId;
+	entry->userid = GetUserId();
 	if (!allocate_entry_chunks(partition, entry, block_len))
 	{
 		hash_search(part_hash[partition_no], &current.key_hash, HASH_REMOVE, NULL);
@@ -1035,12 +1075,12 @@ save_result(RowCollector *collector)
 	pg_atomic_init_u64(&entry->hits, 0);
 
 	dlist_push_head(&partition->lru, &entry->lru_link);
-	partition->bytes_used += block_len;
+	partition->bytes_used += (uint64) entry->nchunks * QC_CHUNK_SIZE;
 	pg_atomic_fetch_add_u64(&shared->stores, 1);
 	LWLockRelease(partition->lock);
 
-	DEBUG_MSG("qcache: saved %llu row(s), %zu bytes",
-			  (unsigned long long) header->num_rows, block_len);
+	DEBUG_MSG("qcache: saved %llu row(s), %zu bytes in %u chunk(s)",
+			  (unsigned long long) header->num_rows, block_len, needed);
 }
 
 /* ---- 3c. Sending saved rows (on a hit) ---- */
@@ -1283,6 +1323,8 @@ qcache_ProcessUtility_hook(PlannedStmt *plan, const char *query_string,
 						   ParamListInfo params, QueryEnvironment *query_env,
 						   DestReceiver *dest, QueryCompletion *completion)
 {
+	bool		commit_prepared = IsA(plan->utilityStmt, TransactionStmt) &&
+		((TransactionStmt *) plan->utilityStmt)->kind == TRANS_STMT_COMMIT_PREPARED;
 	/* Anything else might change data: clear the whole cache at COMMIT. */
 	if (!is_harmless_command(plan->utilityStmt))
 	{
@@ -1290,6 +1332,11 @@ qcache_ProcessUtility_hook(PlannedStmt *plan, const char *query_string,
 			DEBUG_MSG("qcache: this command may change tables; the whole cache "
 					  "will be cleared at COMMIT");
 		structure_changed = true;
+	}
+	if (commit_prepared)
+	{
+		pg_atomic_fetch_add_u32(&shared->inflight[EPOCH_SLOT], 1);
+		BUMP_VERSION(EPOCH_SLOT);
 	}
 
 	nesting_level++;
@@ -1305,6 +1352,11 @@ qcache_ProcessUtility_hook(PlannedStmt *plan, const char *query_string,
 	PG_FINALLY();
 	{
 		nesting_level--;
+		if (commit_prepared)
+		{
+			BUMP_VERSION(EPOCH_SLOT);
+			pg_atomic_fetch_sub_u32(&shared->inflight[EPOCH_SLOT], 1);
+		}
 	}
 	PG_END_TRY();
 }
@@ -1319,27 +1371,41 @@ qcache_ProcessUtility_hook(PlannedStmt *plan, const char *query_string,
  * ====================================================================== */
 
 static void
+bump_written(bool begin_inflight, bool end_inflight)
+{
+	ListCell   *cell;
+
+	foreach(cell, tables_written)
+	{
+		uint32		slot = table_slot(lfirst_oid(cell));
+
+		if (begin_inflight)
+			pg_atomic_fetch_add_u32(&shared->inflight[slot], 1);
+		BUMP_VERSION(slot);
+		if (end_inflight)
+			pg_atomic_fetch_sub_u32(&shared->inflight[slot], 1);
+	}
+	if (structure_changed)
+	{
+		if (begin_inflight)
+			pg_atomic_fetch_add_u32(&shared->inflight[EPOCH_SLOT], 1);
+		BUMP_VERSION(EPOCH_SLOT);
+		if (end_inflight)
+			pg_atomic_fetch_sub_u32(&shared->inflight[EPOCH_SLOT], 1);
+	}
+}
+
+ static void
 qcache_transaction_callback(XactEvent event, void *arg)
 {
-	ListCell *cell;
+	bool		wrote = (tables_written != NIL || structure_changed);
 
 	switch (event)
 	{
 		case XACT_EVENT_PRE_COMMIT:
-			/*
-			 * Make readers bypass old results before PostgreSQL makes this
-			 * transaction's changes visible.
-			 */
-			foreach(cell, tables_written){
-				uint32 slot = table_slot(lfirst_oid(cell));
-				pg_atomic_fetch_add_u32(&shared->inflight[slot], 1);
-				BUMP_VERSION(slot);
-			}
-			if (structure_changed)
-			{
-				pg_atomic_fetch_add_u32(&shared->inflight[EPOCH_SLOT], 1);
-				BUMP_VERSION(EPOCH_SLOT);
-			}
+			if (!wrote || setting_test_skip_precommit)
+				break;
+			bump_written(true, false);
 			precommit_done = true;
 			break;
 
@@ -1349,19 +1415,22 @@ qcache_transaction_callback(XactEvent event, void *arg)
 			 * The changes are now permanent.  The second version bump
 			 * prevents a reader from treating the in-flight window as stable.
 			 */
+			if (wrote)
+				INJECTION_POINT("qcache-before-commit-bump", NULL);
 			if (precommit_done)
 			{
-				foreach(cell, tables_written){
-					uint32 slot = table_slot(lfirst_oid(cell));
-					BUMP_VERSION(slot);
-					pg_atomic_fetch_sub_u32(&shared->inflight[slot], 1);
-				}
-				if (structure_changed)
-				{
-					BUMP_VERSION(EPOCH_SLOT);
-					pg_atomic_fetch_sub_u32(&shared->inflight[EPOCH_SLOT], 1);
-				}
+				bump_written(false, true);
 				precommit_done = false;
+			}
+			else if (wrote)
+			{
+				/*
+				 * No PRE_COMMIT bump happened: PREPARE TRANSACTION (which has
+				 * no PRE_COMMIT event), or qcache.test_skip_precommit.  Bump
+				 * once now; for PREPARE the data becomes visible only at
+				 * COMMIT PREPARED, which bumps the epoch again.
+				 */
+				bump_written(false, false);
 			}
 
 			if(structure_changed){
@@ -1379,16 +1448,7 @@ qcache_transaction_callback(XactEvent event, void *arg)
 			/* ROLLBACK or an error: the data did not change, keep the cache. */
 			if (precommit_done)
 			{
-				foreach(cell, tables_written){
-					uint32 slot = table_slot(lfirst_oid(cell));
-					BUMP_VERSION(slot);
-					pg_atomic_fetch_sub_u32(&shared->inflight[slot], 1);
-				}
-				if (structure_changed)
-				{
-					BUMP_VERSION(EPOCH_SLOT);
-					pg_atomic_fetch_sub_u32(&shared->inflight[EPOCH_SLOT], 1);
-				}
+				bump_written(false, true);
 				precommit_done = false;
 			}
 			forget_transaction_changes();
@@ -1445,7 +1505,7 @@ Datum
 qcache_entries(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *result = (ReturnSetInfo *) fcinfo->resultinfo;
-
+	bool		see_all = has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS);
 	/* Prepare to return many rows at once. */
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -1459,6 +1519,8 @@ qcache_entries(PG_FUNCTION_ARGS)
 		{
 			CachedResult *entry =
 				dlist_container(CachedResult, lru_link, iter.cur);
+			if (entry->dbid != MyDatabaseId)
+				continue;
 			Datum values[4];
 			bool nulls[4] = {false, false, false, false};
 			char *block = MemoryContextAlloc(CurrentMemoryContext, entry->block_len);
@@ -1468,9 +1530,12 @@ qcache_entries(PG_FUNCTION_ARGS)
 			copy_entry_block(entry, block);
 			header = (ResultHeader *) block;
 			text_offset = MAXALIGN(header->total_len) + entry->key_len;
-			values[0] = CStringGetTextDatum(block + text_offset);
+			if (see_all || entry->userid == GetUserId())
+				values[0] = CStringGetTextDatum(block + text_offset);
+			else
+				values[0] = CStringGetTextDatum("<insufficient privilege>");
 			values[1] = Int64GetDatum((int64) header->num_rows);
-			values[2] = Int64GetDatum((int64) entry->block_len);
+			values[2] = Int64GetDatum((int64) entry->nchunks * QC_CHUNK_SIZE);
 			values[3] = Int64GetDatum((int64) pg_atomic_read_u64(&entry->hits));
 			tuplestore_putvalues(result->setResult, result->setDesc, values, nulls);
 		}
@@ -1511,13 +1576,10 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static Size
 qcache_hash_size(void)
 {
-	int entries_per_partition =
-		Max(1, (setting_max_entries + setting_partitions - 1) /
-			setting_partitions);
 	Size total = 0;
 
 	for (int i = 0; i < setting_partitions; i++)
-		total = add_size(total, hash_estimate_size(entries_per_partition,
+		total = add_size(total, hash_estimate_size(entries_per_partition(),
 												   sizeof(CachedResult)));
 	return total;
 }
@@ -1525,10 +1587,8 @@ qcache_hash_size(void)
 static void
 qcache_shmem_request(void)
 {
-	Size chunks = ((Size) setting_max_size_kb * 1024 + QC_CHUNK_DATA - 1) /
-		QC_CHUNK_DATA;
 	Size size = add_size(sizeof(QcacheShared),
-						 mul_size(chunks, sizeof(QcChunk)));
+						 mul_size(total_chunks(), sizeof(QcChunk)));
 
 	if (prev_shmem_request_hook != NULL)
 		prev_shmem_request_hook();
@@ -1572,35 +1632,30 @@ qcache_shmem_startup(void)
 	for (int i = 0; i < setting_partitions; i++)
 	{
 		HASHCTL ctl;
-		int entries_per_partition =
-			Max(1, (setting_max_entries + setting_partitions - 1) /
-				setting_partitions);
 		char name[32];
 
 		memset(&ctl, 0, sizeof(ctl));
 		ctl.keysize = sizeof(uint64);
 		ctl.entrysize = sizeof(CachedResult);
 		snprintf(name, sizeof(name), "qcache part %d", i);
-		part_hash[i] = ShmemInitHash(name, entries_per_partition,
-									 entries_per_partition, &ctl,
+		part_hash[i] = ShmemInitHash(name, entries_per_partition(),
+									 entries_per_partition(), &ctl,
 									 HASH_ELEM | HASH_BLOBS);
 	}
 
 	if (!found)
 	{
-		Size chunks = ((Size) setting_max_size_kb * 1024 + QC_CHUNK_DATA - 1) /
-			QC_CHUNK_DATA;
-		Size chunks_per_partition = chunks / setting_partitions;
-		QcChunk *all_chunks = ShmemAlloc(chunks * sizeof(QcChunk));
+		Size per_partition = chunks_per_partition();
+		QcChunk *all_chunks = ShmemAlloc(mul_size(total_chunks(), sizeof(QcChunk)));
 
 		for (int i = 0; i < setting_partitions; i++)
 		{
 			QcPartition *partition = &shared->parts[i];
 
-			for (Size j = 0; j < chunks_per_partition; j++)
+			for (Size j = 0; j < per_partition; j++)
 			{
 				QcChunk *chunk =
-					&all_chunks[i * chunks_per_partition + j];
+					&all_chunks[i * per_partition + j];
 
 				chunk->next = partition->free;
 				partition->free = chunk;
@@ -1654,6 +1709,10 @@ void _PG_init(void){
 							NULL, &setting_max_entries, QC_MAX_ENTRIES,
 							1, QC_MAX_ENTRIES, PGC_POSTMASTER, 0,
 							NULL, NULL, NULL);
+	DefineCustomBoolVariable("qcache.test_skip_precommit",
+							 "For tests only: skip the PRE_COMMIT version bump.",
+							 NULL, &setting_test_skip_precommit, false,
+							 PGC_SUSET, 0, NULL, NULL, NULL);
 	MarkGUCPrefixReserved("qcache");
 
 	prev_shmem_request_hook = shmem_request_hook;

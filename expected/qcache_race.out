@@ -1,0 +1,102 @@
+Parsed test spec with 3 sessions
+
+starting permutation: r_read r_read w_update r_read c_wakeup r_read c_detach
+qcache_reset
+------------
+            
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step w_update: UPDATE acc SET v = v + 1 WHERE id = 1; <waiting ...>
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+101
+(1 row)
+
+step c_wakeup: SELECT injection_points_wakeup('qcache-before-commit-bump');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step w_update: <... completed>
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+101
+(1 row)
+
+step c_detach: SELECT injection_points_detach('qcache-before-commit-bump');
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: w_protocol_off r_read r_read w_update r_read c_wakeup r_read c_detach
+qcache_reset
+------------
+            
+(1 row)
+
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step w_protocol_off: SET qcache.test_skip_precommit = on;
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step w_update: UPDATE acc SET v = v + 1 WHERE id = 1; <waiting ...>
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+100
+(1 row)
+
+step c_wakeup: SELECT injection_points_wakeup('qcache-before-commit-bump');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step w_update: <... completed>
+step r_read: SELECT v FROM acc WHERE id = 1;
+  v
+---
+101
+(1 row)
+
+step c_detach: SELECT injection_points_detach('qcache-before-commit-bump');
+injection_points_detach
+-----------------------
+                       
+(1 row)
+

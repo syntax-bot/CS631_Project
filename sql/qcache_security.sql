@@ -1,0 +1,58 @@
+-- Permissions on a SHARED cache.  The rule: a cache hit must never show
+-- anyone data they could not get by running the query themselves.
+CREATE EXTENSION qcache;
+CREATE ROLE qc_alice;
+CREATE ROLE qc_bob;
+CREATE TABLE secret (id int, v text);
+INSERT INTO secret VALUES (1, 'top secret');
+GRANT SELECT ON secret TO qc_alice, qc_bob;
+SELECT qcache_reset();
+
+-- 1. bob reads; the result is saved.  After REVOKE, bob's identical query is
+--    refused: permissions are checked in ExecutorStart, before every hit.
+SET ROLE qc_bob;
+SELECT v FROM secret;
+SELECT v FROM secret;
+RESET ROLE;
+REVOKE SELECT ON secret FROM qc_bob;
+SET ROLE qc_bob;
+SELECT v FROM secret;
+RESET ROLE;
+
+-- 2. Column privileges are checked too.
+CREATE TABLE cols (a int, b int);
+INSERT INTO cols VALUES (1, 2);
+GRANT SELECT (a) ON cols TO qc_bob;
+SET ROLE qc_bob;
+SELECT a FROM cols;
+SELECT a, b FROM cols;
+RESET ROLE;
+
+-- 3. EXECUTE on functions is checked on a hit as well.
+CREATE FUNCTION plus_one(int) RETURNS int IMMUTABLE LANGUAGE sql AS 'SELECT $1 + 1';
+GRANT SELECT ON cols TO qc_alice;
+SET ROLE qc_alice;
+SELECT plus_one(a) FROM cols;
+SELECT plus_one(a) FROM cols;
+RESET ROLE;
+REVOKE EXECUTE ON FUNCTION plus_one(int) FROM PUBLIC;
+SET ROLE qc_alice;
+SELECT plus_one(a) FROM cols;
+RESET ROLE;
+
+-- 4. Other users' query texts are hidden in qcache_entries().
+SET ROLE qc_alice;
+SELECT query FROM qcache_entries() ORDER BY query;
+RESET ROLE;
+SELECT query FROM qcache_entries() ORDER BY query;
+
+-- 5. Only superusers may empty the shared cache.
+SET ROLE qc_alice;
+SELECT qcache_reset();
+RESET ROLE;
+
+DROP FUNCTION plus_one(int);
+DROP TABLE secret, cols;
+DROP ROLE qc_alice;
+DROP ROLE qc_bob;
+DROP EXTENSION qcache;
