@@ -1,0 +1,243 @@
+== nocache
+  nocache          E1 heavy  clients=1   writes= 0%          32 tps    31.336 ms
+  nocache          E1 heavy  clients=1   writes= 0%          32 tps    31.282 ms
+  nocache          E1 heavy  clients=1   writes= 0%          32 tps    30.970 ms
+  nocache          E1 cheap  clients=1   writes= 0%        8399 tps     0.119 ms
+  nocache          E1 cheap  clients=1   writes= 0%        8362 tps     0.120 ms
+  nocache          E1 cheap  clients=1   writes= 0%        8333 tps     0.120 ms
+  nocache          E1 unique clients=1   writes= 0%        7192 tps     0.139 ms
+  nocache          E1 unique clients=1   writes= 0%        7136 tps     0.140 ms
+  nocache          E1 unique clients=1   writes= 0%        7176 tps     0.139 ms
+  nocache          E2 heavy  clients=16  writes= 0%         117 tps   136.267 ms
+  nocache          E2 heavy  clients=16  writes= 0%         110 tps   145.638 ms
+  nocache          E2 heavy  clients=16  writes= 0%         110 tps   145.259 ms
+  nocache          E2 heavy  clients=16  writes= 1%         105 tps   151.852 ms
+  nocache          E2 heavy  clients=16  writes= 1%         107 tps   149.113 ms
+  nocache          E2 heavy  clients=16  writes= 1%         113 tps   141.875 ms
+  nocache          E2 heavy  clients=16  writes= 5%         107 tps   148.905 ms
+  nocache          E2 heavy  clients=16  writes= 5%         108 tps   147.888 ms
+  nocache          E2 heavy  clients=16  writes= 5%         108 tps   148.173 ms
+  nocache          E2 heavy  clients=16  writes=10%         111 tps   143.656 ms
+  nocache          E2 heavy  clients=16  writes=10%         117 tps   137.161 ms
+  nocache          E2 heavy  clients=16  writes=10%         117 tps   137.322 ms
+  nocache          E2 heavy  clients=16  writes=20%         122 tps   131.035 ms
+  nocache          E2 heavy  clients=16  writes=20%         128 tps   124.923 ms
+  nocache          E2 heavy  clients=16  writes=20%         128 tps   125.396 ms
+  nocache          E2 heavy  clients=16  writes=50%         198 tps    80.668 ms
+  nocache          E2 heavy  clients=16  writes=50%         189 tps    84.734 ms
+  nocache          E2 heavy  clients=16  writes=50%         192 tps    83.210 ms
+  nocache          E3 cheap  clients=1   writes= 5%        5447 tps     0.184 ms
+  nocache          E3 cheap  clients=1   writes= 5%        5359 tps     0.187 ms
+  nocache          E3 cheap  clients=1   writes= 5%        5208 tps     0.192 ms
+  nocache          E3 cheap  clients=2   writes= 5%       10374 tps     0.193 ms
+  nocache          E3 cheap  clients=2   writes= 5%       10420 tps     0.192 ms
+  nocache          E3 cheap  clients=2   writes= 5%       10395 tps     0.192 ms
+  nocache          E3 cheap  clients=4   writes= 5%       17891 tps     0.224 ms
+  nocache          E3 cheap  clients=4   writes= 5%       17244 tps     0.232 ms
+  nocache          E3 cheap  clients=4   writes= 5%       16433 tps     0.243 ms
+  nocache          E3 cheap  clients=8   writes= 5%       23767 tps     0.337 ms
+  nocache          E3 cheap  clients=8   writes= 5%       14125 tps     0.566 ms
+  nocache          E3 cheap  clients=8   writes= 5%       13501 tps     0.593 ms
+  nocache          E3 cheap  clients=16  writes= 5%       23160 tps     0.691 ms
+  nocache          E3 cheap  clients=16  writes= 5%       23153 tps     0.691 ms
+  nocache          E3 cheap  clients=16  writes= 5%       23699 tps     0.675 ms
+  nocache          E3 cheap  clients=32  writes= 5%       34771 tps     0.920 ms
+  nocache          E3 cheap  clients=32  writes= 5%       34684 tps     0.923 ms
+  nocache          E3 cheap  clients=32  writes= 5%       35301 tps     0.906 ms
+== mysql
+  mysql            E2 heavy  clients=16  writes= 0%       29085 tps     0.550 ms
+  mysql            E2 heavy  clients=16  writes= 0%       29708 tps     0.539 ms
+  mysql            E2 heavy  clients=16  writes= 0%       30105 tps     0.531 ms
+  mysql            E2 heavy  clients=16  writes= 1%         341 tps    46.957 ms
+  mysql            E2 heavy  clients=16  writes= 1%         352 tps    45.445 ms
+  mysql            E2 heavy  clients=16  writes= 1%         287 tps    55.721 ms
+  mysql            E2 heavy  clients=16  writes= 5%         130 tps   123.511 ms
+  mysql            E2 heavy  clients=16  writes= 5%         121 tps   132.493 ms
+  mysql            E2 heavy  clients=16  writes= 5%         120 tps   133.502 ms
+  mysql            E2 heavy  clients=16  writes=10%         113 tps   142.141 ms
+  mysql            E2 heavy  clients=16  writes=10%         117 tps   136.962 ms
+  mysql            E2 heavy  clients=16  writes=10%         119 tps   134.649 ms
+  mysql            E2 heavy  clients=16  writes=20%         120 tps   133.732 ms
+  mysql            E2 heavy  clients=16  writes=20%         117 tps   136.635 ms
+  mysql            E2 heavy  clients=16  writes=20%         129 tps   124.414 ms
+  mysql            E2 heavy  clients=16  writes=50%         178 tps    89.754 ms
+  mysql            E2 heavy  clients=16  writes=50%         172 tps    93.176 ms
+  mysql            E2 heavy  clients=16  writes=50%         180 tps    88.879 ms
+  mysql            E3 cheap  clients=1   writes= 5%        5271 tps     0.190 ms
+  mysql            E3 cheap  clients=1   writes= 5%        5182 tps     0.193 ms
+  mysql            E3 cheap  clients=1   writes= 5%        5142 tps     0.194 ms
+  mysql            E3 cheap  clients=2   writes= 5%       10124 tps     0.198 ms
+  mysql            E3 cheap  clients=2   writes= 5%        9751 tps     0.205 ms
+  mysql            E3 cheap  clients=2   writes= 5%        9787 tps     0.204 ms
+  mysql            E3 cheap  clients=4   writes= 5%       17644 tps     0.227 ms
+  mysql            E3 cheap  clients=4   writes= 5%       16022 tps     0.250 ms
+  mysql            E3 cheap  clients=4   writes= 5%       17129 tps     0.234 ms
+  mysql            E3 cheap  clients=8   writes= 5%       23196 tps     0.345 ms
+  mysql            E3 cheap  clients=8   writes= 5%       22925 tps     0.349 ms
+  mysql            E3 cheap  clients=8   writes= 5%       23352 tps     0.343 ms
+  mysql            E3 cheap  clients=16  writes= 5%       22043 tps     0.726 ms
+  mysql            E3 cheap  clients=16  writes= 5%       22218 tps     0.720 ms
+  mysql            E3 cheap  clients=16  writes= 5%       23050 tps     0.694 ms
+  mysql            E3 cheap  clients=32  writes= 5%       34749 tps     0.921 ms
+  mysql            E3 cheap  clients=32  writes= 5%       34811 tps     0.919 ms
+  mysql            E3 cheap  clients=32  writes= 5%       34285 tps     0.933 ms
+NOTICE:  table "cc" does not exist, skipping
+NOTICE:  table "other" does not exist, skipping
+  mysql            E4   1000 cached results: commit 4.432 ms
+  mysql            E4  10000 cached results: commit 5.612 ms
+  mysql            E4  50000 cached results: commit 6.281 ms
+== partitions_only
+  partitions_only  E2 heavy  clients=16  writes= 0%       29712 tps     0.538 ms
+  partitions_only  E2 heavy  clients=16  writes= 0%       29815 tps     0.537 ms
+  partitions_only  E2 heavy  clients=16  writes= 0%       30101 tps     0.532 ms
+  partitions_only  E2 heavy  clients=16  writes= 1%         354 tps    45.171 ms
+  partitions_only  E2 heavy  clients=16  writes= 1%         275 tps    58.176 ms
+  partitions_only  E2 heavy  clients=16  writes= 1%         355 tps    45.089 ms
+  partitions_only  E2 heavy  clients=16  writes= 5%         133 tps   120.013 ms
+  partitions_only  E2 heavy  clients=16  writes= 5%         122 tps   131.003 ms
+  partitions_only  E2 heavy  clients=16  writes= 5%         125 tps   127.514 ms
+  partitions_only  E2 heavy  clients=16  writes=10%         112 tps   142.545 ms
+  partitions_only  E2 heavy  clients=16  writes=10%         118 tps   136.111 ms
+  partitions_only  E2 heavy  clients=16  writes=10%         109 tps   146.689 ms
+  partitions_only  E2 heavy  clients=16  writes=20%         116 tps   138.071 ms
+  partitions_only  E2 heavy  clients=16  writes=20%         116 tps   138.459 ms
+  partitions_only  E2 heavy  clients=16  writes=20%         115 tps   139.669 ms
+  partitions_only  E2 heavy  clients=16  writes=50%         170 tps    94.365 ms
+  partitions_only  E2 heavy  clients=16  writes=50%         175 tps    91.536 ms
+  partitions_only  E2 heavy  clients=16  writes=50%         174 tps    92.015 ms
+  partitions_only  E3 cheap  clients=1   writes= 5%        5235 tps     0.191 ms
+  partitions_only  E3 cheap  clients=1   writes= 5%        5158 tps     0.194 ms
+  partitions_only  E3 cheap  clients=1   writes= 5%        5210 tps     0.192 ms
+  partitions_only  E3 cheap  clients=2   writes= 5%       10104 tps     0.198 ms
+  partitions_only  E3 cheap  clients=2   writes= 5%       10001 tps     0.200 ms
+  partitions_only  E3 cheap  clients=2   writes= 5%       10036 tps     0.199 ms
+  partitions_only  E3 cheap  clients=4   writes= 5%       17916 tps     0.223 ms
+  partitions_only  E3 cheap  clients=4   writes= 5%       16842 tps     0.238 ms
+  partitions_only  E3 cheap  clients=4   writes= 5%       16934 tps     0.236 ms
+  partitions_only  E3 cheap  clients=8   writes= 5%       24028 tps     0.333 ms
+  partitions_only  E3 cheap  clients=8   writes= 5%       17186 tps     0.465 ms
+  partitions_only  E3 cheap  clients=8   writes= 5%       23234 tps     0.344 ms
+  partitions_only  E3 cheap  clients=16  writes= 5%       30759 tps     0.520 ms
+  partitions_only  E3 cheap  clients=16  writes= 5%       22290 tps     0.718 ms
+  partitions_only  E3 cheap  clients=16  writes= 5%       23223 tps     0.689 ms
+  partitions_only  E3 cheap  clients=32  writes= 5%       34816 tps     0.919 ms
+  partitions_only  E3 cheap  clients=32  writes= 5%       35006 tps     0.914 ms
+  partitions_only  E3 cheap  clients=32  writes= 5%       34594 tps     0.925 ms
+  partitions_only  E4   1000 cached results: commit 5.027 ms
+  partitions_only  E4  10000 cached results: commit 1.339 ms
+  partitions_only  E4  50000 cached results: commit 2.970 ms
+== versions_only
+  versions_only    E2 heavy  clients=16  writes= 0%       29568 tps     0.541 ms
+  versions_only    E2 heavy  clients=16  writes= 0%       29887 tps     0.535 ms
+  versions_only    E2 heavy  clients=16  writes= 0%       30098 tps     0.532 ms
+  versions_only    E2 heavy  clients=16  writes= 1%         307 tps    52.047 ms
+  versions_only    E2 heavy  clients=16  writes= 1%         362 tps    44.257 ms
+  versions_only    E2 heavy  clients=16  writes= 1%         397 tps    40.258 ms
+  versions_only    E2 heavy  clients=16  writes= 5%         118 tps   135.437 ms
+  versions_only    E2 heavy  clients=16  writes= 5%         125 tps   128.005 ms
+  versions_only    E2 heavy  clients=16  writes= 5%         113 tps   141.313 ms
+  versions_only    E2 heavy  clients=16  writes=10%         117 tps   137.086 ms
+  versions_only    E2 heavy  clients=16  writes=10%         114 tps   140.920 ms
+  versions_only    E2 heavy  clients=16  writes=10%         108 tps   147.579 ms
+  versions_only    E2 heavy  clients=16  writes=20%         114 tps   140.062 ms
+  versions_only    E2 heavy  clients=16  writes=20%         114 tps   140.056 ms
+  versions_only    E2 heavy  clients=16  writes=20%         111 tps   144.063 ms
+  versions_only    E2 heavy  clients=16  writes=50%         175 tps    91.329 ms
+  versions_only    E2 heavy  clients=16  writes=50%         175 tps    91.220 ms
+  versions_only    E2 heavy  clients=16  writes=50%         170 tps    93.918 ms
+  versions_only    E3 cheap  clients=1   writes= 5%        5256 tps     0.190 ms
+  versions_only    E3 cheap  clients=1   writes= 5%        5226 tps     0.191 ms
+  versions_only    E3 cheap  clients=1   writes= 5%        5147 tps     0.194 ms
+  versions_only    E3 cheap  clients=2   writes= 5%       10064 tps     0.199 ms
+  versions_only    E3 cheap  clients=2   writes= 5%        9954 tps     0.201 ms
+  versions_only    E3 cheap  clients=2   writes= 5%       10075 tps     0.199 ms
+  versions_only    E3 cheap  clients=4   writes= 5%       17830 tps     0.224 ms
+  versions_only    E3 cheap  clients=4   writes= 5%       16894 tps     0.237 ms
+  versions_only    E3 cheap  clients=4   writes= 5%       16981 tps     0.236 ms
+  versions_only    E3 cheap  clients=8   writes= 5%       24026 tps     0.333 ms
+  versions_only    E3 cheap  clients=8   writes= 5%       14318 tps     0.559 ms
+  versions_only    E3 cheap  clients=8   writes= 5%       13703 tps     0.584 ms
+  versions_only    E3 cheap  clients=16  writes= 5%       23452 tps     0.682 ms
+  versions_only    E3 cheap  clients=16  writes= 5%       22441 tps     0.713 ms
+  versions_only    E3 cheap  clients=16  writes= 5%       22875 tps     0.699 ms
+  versions_only    E3 cheap  clients=32  writes= 5%       34484 tps     0.928 ms
+  versions_only    E3 cheap  clients=32  writes= 5%       34337 tps     0.932 ms
+  versions_only    E3 cheap  clients=32  writes= 5%       34856 tps     0.918 ms
+== qcache
+  qcache           E1 heavy  clients=1   writes= 0%        4208 tps     0.238 ms
+  qcache           E1 heavy  clients=1   writes= 0%        4869 tps     0.205 ms
+  qcache           E1 heavy  clients=1   writes= 0%        4821 tps     0.207 ms
+  qcache           E1 cheap  clients=1   writes= 0%        9106 tps     0.110 ms
+  qcache           E1 cheap  clients=1   writes= 0%        9220 tps     0.108 ms
+  qcache           E1 cheap  clients=1   writes= 0%        9129 tps     0.110 ms
+  qcache           E1 unique clients=1   writes= 0%        6571 tps     0.152 ms
+  qcache           E1 unique clients=1   writes= 0%        6547 tps     0.153 ms
+  qcache           E1 unique clients=1   writes= 0%        6494 tps     0.154 ms
+  qcache           E2 heavy  clients=16  writes= 0%       35378 tps     0.452 ms
+  qcache           E2 heavy  clients=16  writes= 0%       30226 tps     0.529 ms
+  qcache           E2 heavy  clients=16  writes= 0%       30346 tps     0.527 ms
+  qcache           E2 heavy  clients=16  writes= 1%         352 tps    45.501 ms
+  qcache           E2 heavy  clients=16  writes= 1%         347 tps    46.055 ms
+  qcache           E2 heavy  clients=16  writes= 1%         338 tps    47.333 ms
+  qcache           E2 heavy  clients=16  writes= 5%         142 tps   112.389 ms
+  qcache           E2 heavy  clients=16  writes= 5%         128 tps   125.256 ms
+  qcache           E2 heavy  clients=16  writes= 5%         116 tps   138.101 ms
+  qcache           E2 heavy  clients=16  writes=10%         112 tps   143.442 ms
+  qcache           E2 heavy  clients=16  writes=10%         119 tps   134.373 ms
+  qcache           E2 heavy  clients=16  writes=10%         109 tps   146.667 ms
+  qcache           E2 heavy  clients=16  writes=20%         111 tps   143.595 ms
+  qcache           E2 heavy  clients=16  writes=20%         118 tps   135.271 ms
+  qcache           E2 heavy  clients=16  writes=20%         113 tps   141.376 ms
+  qcache           E2 heavy  clients=16  writes=50%         174 tps    92.171 ms
+  qcache           E2 heavy  clients=16  writes=50%         176 tps    90.966 ms
+  qcache           E2 heavy  clients=16  writes=50%         187 tps    85.356 ms
+  qcache           E3 cheap  clients=1   writes= 5%        5242 tps     0.191 ms
+  qcache           E3 cheap  clients=1   writes= 5%        5187 tps     0.193 ms
+  qcache           E3 cheap  clients=1   writes= 5%        5170 tps     0.193 ms
+  qcache           E3 cheap  clients=2   writes= 5%       10024 tps     0.200 ms
+  qcache           E3 cheap  clients=2   writes= 5%       10079 tps     0.198 ms
+  qcache           E3 cheap  clients=2   writes= 5%       10093 tps     0.198 ms
+  qcache           E3 cheap  clients=4   writes= 5%       17956 tps     0.223 ms
+  qcache           E3 cheap  clients=4   writes= 5%       16756 tps     0.239 ms
+  qcache           E3 cheap  clients=4   writes= 5%       16825 tps     0.238 ms
+  qcache           E3 cheap  clients=8   writes= 5%       24054 tps     0.333 ms
+  qcache           E3 cheap  clients=8   writes= 5%       14076 tps     0.568 ms
+  qcache           E3 cheap  clients=8   writes= 5%       23113 tps     0.346 ms
+  qcache           E3 cheap  clients=16  writes= 5%       29992 tps     0.533 ms
+  qcache           E3 cheap  clients=16  writes= 5%       31081 tps     0.515 ms
+  qcache           E3 cheap  clients=16  writes= 5%       30801 tps     0.519 ms
+  qcache           E3 cheap  clients=32  writes= 5%       34843 tps     0.918 ms
+  qcache           E3 cheap  clients=32  writes= 5%       32117 tps     0.996 ms
+  qcache           E3 cheap  clients=32  writes= 5%       35146 tps     0.910 ms
+  qcache           E4   1000 cached results: commit 1.290 ms
+  qcache           E4  10000 cached results: commit 2.029 ms
+  qcache           E4  50000 cached results: commit 1.242 ms
+== qcache_admit
+  qcache_admit     E1 heavy  clients=1   writes= 0%        4400 tps     0.227 ms
+  qcache_admit     E1 heavy  clients=1   writes= 0%        4786 tps     0.209 ms
+  qcache_admit     E1 heavy  clients=1   writes= 0%        4859 tps     0.206 ms
+  qcache_admit     E1 cheap  clients=1   writes= 0%        8017 tps     0.125 ms
+  qcache_admit     E1 cheap  clients=1   writes= 0%        8014 tps     0.125 ms
+  qcache_admit     E1 cheap  clients=1   writes= 0%        7974 tps     0.125 ms
+  qcache_admit     E1 unique clients=1   writes= 0%        6607 tps     0.151 ms
+  qcache_admit     E1 unique clients=1   writes= 0%        6574 tps     0.152 ms
+  qcache_admit     E1 unique clients=1   writes= 0%        6531 tps     0.153 ms
+  qcache_admit     E3 cheap  clients=1   writes= 5%        5316 tps     0.188 ms
+  qcache_admit     E3 cheap  clients=1   writes= 5%        5228 tps     0.191 ms
+  qcache_admit     E3 cheap  clients=1   writes= 5%        5306 tps     0.188 ms
+  qcache_admit     E3 cheap  clients=2   writes= 5%       10149 tps     0.197 ms
+  qcache_admit     E3 cheap  clients=2   writes= 5%       10120 tps     0.198 ms
+  qcache_admit     E3 cheap  clients=2   writes= 5%       10093 tps     0.198 ms
+  qcache_admit     E3 cheap  clients=4   writes= 5%       17889 tps     0.224 ms
+  qcache_admit     E3 cheap  clients=4   writes= 5%       17119 tps     0.234 ms
+  qcache_admit     E3 cheap  clients=4   writes= 5%       16897 tps     0.237 ms
+  qcache_admit     E3 cheap  clients=8   writes= 5%       23959 tps     0.334 ms
+  qcache_admit     E3 cheap  clients=8   writes= 5%       20994 tps     0.381 ms
+  qcache_admit     E3 cheap  clients=8   writes= 5%       13501 tps     0.593 ms
+  qcache_admit     E3 cheap  clients=16  writes= 5%       22337 tps     0.716 ms
+  qcache_admit     E3 cheap  clients=16  writes= 5%       23212 tps     0.689 ms
+  qcache_admit     E3 cheap  clients=16  writes= 5%       23417 tps     0.683 ms
+  qcache_admit     E3 cheap  clients=32  writes= 5%       34635 tps     0.924 ms
+  qcache_admit     E3 cheap  clients=32  writes= 5%       33870 tps     0.945 ms
+  qcache_admit     E3 cheap  clients=32  writes= 5%       34503 tps     0.927 ms
+results in /home/joli/IITB/Impl_RelDatab/postgres-hacking/qcache/bench/results.csv; now run: python3 /home/joli/IITB/Impl_RelDatab/postgres-hacking/qcache/bench/analyze.py

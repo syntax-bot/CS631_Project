@@ -1,0 +1,278 @@
+nohup: ignoring input
+== nocache: E1 E2 E3 E4
+  nocache          E1 heavy  clients=1   writes= 0%         140 tps     7.139 ms  hits 0%
+  nocache          E1 heavy  clients=1   writes= 0%         137 tps     7.288 ms  hits 0%
+  nocache          E1 heavy  clients=1   writes= 0%         144 tps     6.950 ms  hits 0%
+  nocache          E1 cheap  clients=1   writes= 0%       56363 tps     0.018 ms  hits 0%
+  nocache          E1 cheap  clients=1   writes= 0%       56163 tps     0.018 ms  hits 0%
+  nocache          E1 cheap  clients=1   writes= 0%       57062 tps     0.018 ms  hits 0%
+  nocache          E1 unique clients=1   writes= 0%       52292 tps     0.019 ms  hits 0%
+  nocache          E1 unique clients=1   writes= 0%       51640 tps     0.019 ms  hits 0%
+  nocache          E1 unique clients=1   writes= 0%       51642 tps     0.019 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 0%        1270 tps    12.600 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 0%        1017 tps    15.737 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 0%        1023 tps    15.633 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 1%        1023 tps    15.639 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 1%        1025 tps    15.613 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 1%        1023 tps    15.645 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 5%        1068 tps    14.984 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 5%        1069 tps    14.968 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes= 5%        1065 tps    15.020 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes=20%        1190 tps    13.446 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes=20%        1113 tps    14.381 ms  hits 0%
+  nocache          E2 heavy  clients=16  writes=20%        1244 tps    12.866 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 0%      280848 tps     0.057 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 0%      272908 tps     0.059 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 0%      254422 tps     0.063 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 1%      259414 tps     0.062 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 1%      256519 tps     0.062 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 1%      253220 tps     0.063 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 5%      239280 tps     0.067 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 5%      236343 tps     0.068 ms  hits 0%
+  nocache          E3 lookup clients=16  writes= 5%      238415 tps     0.067 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=10%      229063 tps     0.070 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=10%      221385 tps     0.072 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=10%      220806 tps     0.072 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=20%      194667 tps     0.082 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=20%      213708 tps     0.075 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=20%      203925 tps     0.078 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=50%      171007 tps     0.094 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=50%      166482 tps     0.096 ms  hits 0%
+  nocache          E3 lookup clients=16  writes=50%      175848 tps     0.091 ms  hits 0%
+  nocache          E4 lookup clients=1   writes= 5%       46263 tps     0.022 ms  hits 0%
+  nocache          E4 lookup clients=1   writes= 5%       47107 tps     0.021 ms  hits 0%
+  nocache          E4 lookup clients=1   writes= 5%       46680 tps     0.021 ms  hits 0%
+  nocache          E4 lookup clients=2   writes= 5%       93040 tps     0.021 ms  hits 0%
+  nocache          E4 lookup clients=2   writes= 5%       89837 tps     0.022 ms  hits 0%
+  nocache          E4 lookup clients=2   writes= 5%       82962 tps     0.024 ms  hits 0%
+  nocache          E4 lookup clients=4   writes= 5%      121508 tps     0.033 ms  hits 0%
+  nocache          E4 lookup clients=4   writes= 5%      133475 tps     0.030 ms  hits 0%
+  nocache          E4 lookup clients=4   writes= 5%      132529 tps     0.030 ms  hits 0%
+  nocache          E4 lookup clients=8   writes= 5%      171652 tps     0.047 ms  hits 0%
+  nocache          E4 lookup clients=8   writes= 5%      169707 tps     0.047 ms  hits 0%
+  nocache          E4 lookup clients=8   writes= 5%      180221 tps     0.044 ms  hits 0%
+  nocache          E4 lookup clients=16  writes= 5%      247841 tps     0.065 ms  hits 0%
+  nocache          E4 lookup clients=16  writes= 5%      247360 tps     0.065 ms  hits 0%
+  nocache          E4 lookup clients=16  writes= 5%      252283 tps     0.063 ms  hits 0%
+  nocache          E4 lookup clients=32  writes= 5%      273137 tps     0.117 ms  hits 0%
+  nocache          E4 lookup clients=32  writes= 5%      272717 tps     0.117 ms  hits 0%
+  nocache          E4 lookup clients=32  writes= 5%      272459 tps     0.117 ms  hits 0%
+== mysql: E2 E3 E4 E5
+  mysql            E2 heavy  clients=16  writes= 0%      169003 tps     0.095 ms  hits 99%
+  mysql            E2 heavy  clients=16  writes= 0%      169770 tps     0.094 ms  hits 99%
+  mysql            E2 heavy  clients=16  writes= 0%      169923 tps     0.094 ms  hits 99%
+  mysql            E2 heavy  clients=16  writes= 1%        2722 tps     5.879 ms  hits 63%
+  mysql            E2 heavy  clients=16  writes= 1%        2651 tps     6.036 ms  hits 62%
+  mysql            E2 heavy  clients=16  writes= 1%        2794 tps     5.726 ms  hits 64%
+  mysql            E2 heavy  clients=16  writes= 5%        1405 tps    11.386 ms  hits 25%
+  mysql            E2 heavy  clients=16  writes= 5%        1377 tps    11.619 ms  hits 23%
+  mysql            E2 heavy  clients=16  writes= 5%        1389 tps    11.521 ms  hits 24%
+  mysql            E2 heavy  clients=16  writes=20%        1302 tps    12.287 ms  hits 4%
+  mysql            E2 heavy  clients=16  writes=20%        1289 tps    12.414 ms  hits 4%
+  mysql            E2 heavy  clients=16  writes=20%        1288 tps    12.418 ms  hits 4%
+  mysql            E3 lookup clients=16  writes= 0%      289967 tps     0.055 ms  hits 99%
+  mysql            E3 lookup clients=16  writes= 0%      289929 tps     0.055 ms  hits 99%
+  mysql            E3 lookup clients=16  writes= 0%      289011 tps     0.055 ms  hits 99%
+  mysql            E3 lookup clients=16  writes= 1%       92614 tps     0.173 ms  hits 99%
+  mysql            E3 lookup clients=16  writes= 1%       87523 tps     0.183 ms  hits 99%
+  mysql            E3 lookup clients=16  writes= 1%       88573 tps     0.181 ms  hits 99%
+  mysql            E3 lookup clients=16  writes= 5%       38458 tps     0.416 ms  hits 99%
+  mysql            E3 lookup clients=16  writes= 5%       39038 tps     0.410 ms  hits 99%
+  mysql            E3 lookup clients=16  writes= 5%       36458 tps     0.439 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=10%       23174 tps     0.690 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=10%       22729 tps     0.704 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=10%       23311 tps     0.686 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=20%       13168 tps     1.215 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=20%       13604 tps     1.176 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=20%       13156 tps     1.216 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=50%        5490 tps     2.914 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=50%        5645 tps     2.834 ms  hits 99%
+  mysql            E3 lookup clients=16  writes=50%        5675 tps     2.819 ms  hits 99%
+  mysql            E4 lookup clients=1   writes= 5%       40285 tps     0.025 ms  hits 99%
+  mysql            E4 lookup clients=1   writes= 5%       39472 tps     0.025 ms  hits 99%
+  mysql            E4 lookup clients=1   writes= 5%       39328 tps     0.025 ms  hits 99%
+  mysql            E4 lookup clients=2   writes= 5%       61642 tps     0.032 ms  hits 99%
+  mysql            E4 lookup clients=2   writes= 5%       61263 tps     0.033 ms  hits 99%
+  mysql            E4 lookup clients=2   writes= 5%       60984 tps     0.033 ms  hits 99%
+  mysql            E4 lookup clients=4   writes= 5%       66474 tps     0.060 ms  hits 99%
+  mysql            E4 lookup clients=4   writes= 5%       76897 tps     0.052 ms  hits 99%
+  mysql            E4 lookup clients=4   writes= 5%       69991 tps     0.057 ms  hits 99%
+  mysql            E4 lookup clients=8   writes= 5%       41341 tps     0.194 ms  hits 99%
+  mysql            E4 lookup clients=8   writes= 5%       33503 tps     0.239 ms  hits 99%
+  mysql            E4 lookup clients=8   writes= 5%       38349 tps     0.209 ms  hits 99%
+  mysql            E4 lookup clients=16  writes= 5%       34977 tps     0.457 ms  hits 99%
+  mysql            E4 lookup clients=16  writes= 5%       47495 tps     0.337 ms  hits 99%
+  mysql            E4 lookup clients=16  writes= 5%       42775 tps     0.374 ms  hits 99%
+  mysql            E4 lookup clients=32  writes= 5%       42639 tps     0.750 ms  hits 99%
+  mysql            E4 lookup clients=32  writes= 5%       45274 tps     0.707 ms  hits 99%
+  mysql            E4 lookup clients=32  writes= 5%       46093 tps     0.694 ms  hits 99%
+  mysql            E5   1000 cached results: commit 0.054 ms
+  mysql            E5   1000 cached results: commit 0.020 ms
+  mysql            E5   1000 cached results: commit 0.020 ms
+  mysql            E5  10000 cached results: commit 0.075 ms
+  mysql            E5  10000 cached results: commit 0.076 ms
+  mysql            E5  10000 cached results: commit 0.075 ms
+  mysql            E5  50000 cached results: commit 0.330 ms
+  mysql            E5  50000 cached results: commit 0.301 ms
+  mysql            E5  50000 cached results: commit 0.310 ms
+== partitions_only: E3 E4 E5
+  partitions_only  E3 lookup clients=16  writes= 0%      293652 tps     0.054 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes= 0%      299773 tps     0.053 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes= 0%      298830 tps     0.054 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes= 1%      219320 tps     0.073 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes= 1%      214462 tps     0.075 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes= 1%      227494 tps     0.070 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes= 5%      169933 tps     0.094 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes= 5%      168096 tps     0.095 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes= 5%      153671 tps     0.104 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=10%      119100 tps     0.134 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=10%      121998 tps     0.131 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=10%      132846 tps     0.120 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=20%       82359 tps     0.194 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=20%       85321 tps     0.188 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=20%       83857 tps     0.191 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=50%       43367 tps     0.369 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=50%       44666 tps     0.358 ms  hits 99%
+  partitions_only  E3 lookup clients=16  writes=50%       45136 tps     0.354 ms  hits 99%
+  partitions_only  E4 lookup clients=1   writes= 5%       32424 tps     0.031 ms  hits 99%
+  partitions_only  E4 lookup clients=1   writes= 5%       34577 tps     0.029 ms  hits 99%
+  partitions_only  E4 lookup clients=1   writes= 5%       36039 tps     0.028 ms  hits 99%
+  partitions_only  E4 lookup clients=2   writes= 5%       75215 tps     0.027 ms  hits 99%
+  partitions_only  E4 lookup clients=2   writes= 5%       70866 tps     0.028 ms  hits 99%
+  partitions_only  E4 lookup clients=2   writes= 5%       69857 tps     0.029 ms  hits 99%
+  partitions_only  E4 lookup clients=4   writes= 5%      114285 tps     0.035 ms  hits 99%
+  partitions_only  E4 lookup clients=4   writes= 5%      114037 tps     0.035 ms  hits 99%
+  partitions_only  E4 lookup clients=4   writes= 5%      110065 tps     0.036 ms  hits 99%
+  partitions_only  E4 lookup clients=8   writes= 5%      141928 tps     0.056 ms  hits 99%
+  partitions_only  E4 lookup clients=8   writes= 5%      140365 tps     0.057 ms  hits 99%
+  partitions_only  E4 lookup clients=8   writes= 5%      147720 tps     0.054 ms  hits 99%
+  partitions_only  E4 lookup clients=16  writes= 5%      173905 tps     0.092 ms  hits 99%
+  partitions_only  E4 lookup clients=16  writes= 5%      173106 tps     0.092 ms  hits 99%
+  partitions_only  E4 lookup clients=16  writes= 5%      172564 tps     0.093 ms  hits 99%
+  partitions_only  E4 lookup clients=32  writes= 5%      178438 tps     0.179 ms  hits 99%
+  partitions_only  E4 lookup clients=32  writes= 5%      189810 tps     0.169 ms  hits 99%
+  partitions_only  E4 lookup clients=32  writes= 5%      186315 tps     0.172 ms  hits 99%
+  partitions_only  E5   1000 cached results: commit 0.030 ms
+  partitions_only  E5   1000 cached results: commit 0.048 ms
+  partitions_only  E5   1000 cached results: commit 0.025 ms
+  partitions_only  E5  10000 cached results: commit 0.069 ms
+  partitions_only  E5  10000 cached results: commit 0.075 ms
+  partitions_only  E5  10000 cached results: commit 0.080 ms
+  partitions_only  E5  50000 cached results: commit 0.295 ms
+  partitions_only  E5  50000 cached results: commit 0.293 ms
+  partitions_only  E5  50000 cached results: commit 0.388 ms
+== versions_only: E3 E4
+  versions_only    E3 lookup clients=16  writes= 0%      292071 tps     0.055 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes= 0%      289309 tps     0.055 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes= 0%      285056 tps     0.056 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes= 1%      284720 tps     0.056 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes= 1%      278839 tps     0.057 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes= 1%      287837 tps     0.056 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes= 5%      271844 tps     0.059 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes= 5%      255582 tps     0.063 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes= 5%      266302 tps     0.060 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=10%      245432 tps     0.065 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=10%      267949 tps     0.060 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=10%      243291 tps     0.066 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=20%      222518 tps     0.072 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=20%      222683 tps     0.072 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=20%      223600 tps     0.072 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=50%      171290 tps     0.093 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=50%      182986 tps     0.087 ms  hits 99%
+  versions_only    E3 lookup clients=16  writes=50%      177489 tps     0.090 ms  hits 99%
+  versions_only    E4 lookup clients=1   writes= 5%       45019 tps     0.022 ms  hits 99%
+  versions_only    E4 lookup clients=1   writes= 5%       51206 tps     0.020 ms  hits 99%
+  versions_only    E4 lookup clients=1   writes= 5%       43323 tps     0.023 ms  hits 99%
+  versions_only    E4 lookup clients=2   writes= 5%       92372 tps     0.022 ms  hits 99%
+  versions_only    E4 lookup clients=2   writes= 5%       86526 tps     0.023 ms  hits 99%
+  versions_only    E4 lookup clients=2   writes= 5%       95756 tps     0.021 ms  hits 99%
+  versions_only    E4 lookup clients=4   writes= 5%      126000 tps     0.032 ms  hits 99%
+  versions_only    E4 lookup clients=4   writes= 5%      124720 tps     0.032 ms  hits 99%
+  versions_only    E4 lookup clients=4   writes= 5%      124767 tps     0.032 ms  hits 99%
+  versions_only    E4 lookup clients=8   writes= 5%      170946 tps     0.047 ms  hits 99%
+  versions_only    E4 lookup clients=8   writes= 5%      174229 tps     0.046 ms  hits 99%
+  versions_only    E4 lookup clients=8   writes= 5%      178549 tps     0.045 ms  hits 99%
+  versions_only    E4 lookup clients=16  writes= 5%      258786 tps     0.062 ms  hits 99%
+  versions_only    E4 lookup clients=16  writes= 5%      246052 tps     0.065 ms  hits 99%
+  versions_only    E4 lookup clients=16  writes= 5%      246093 tps     0.065 ms  hits 99%
+  versions_only    E4 lookup clients=32  writes= 5%      227901 tps     0.140 ms  hits 99%
+  versions_only    E4 lookup clients=32  writes= 5%      253616 tps     0.126 ms  hits 99%
+  versions_only    E4 lookup clients=32  writes= 5%      253868 tps     0.126 ms  hits 99%
+== qcache: E1 E2 E3 E4 E5
+  qcache           E1 heavy  clients=1   writes= 0%       33933 tps     0.029 ms  hits 99%
+  qcache           E1 heavy  clients=1   writes= 0%       33956 tps     0.029 ms  hits 99%
+  qcache           E1 heavy  clients=1   writes= 0%       34578 tps     0.029 ms  hits 99%
+  qcache           E1 cheap  clients=1   writes= 0%       49408 tps     0.020 ms  hits 99%
+  qcache           E1 cheap  clients=1   writes= 0%       49188 tps     0.020 ms  hits 99%
+  qcache           E1 cheap  clients=1   writes= 0%       47759 tps     0.021 ms  hits 99%
+  qcache           E1 unique clients=1   writes= 0%       37351 tps     0.027 ms  hits 0%
+  qcache           E1 unique clients=1   writes= 0%       40243 tps     0.025 ms  hits 0%
+  qcache           E1 unique clients=1   writes= 0%       40934 tps     0.024 ms  hits 0%
+  qcache           E2 heavy  clients=16  writes= 0%      192821 tps     0.083 ms  hits 99%
+  qcache           E2 heavy  clients=16  writes= 0%      157143 tps     0.102 ms  hits 99%
+  qcache           E2 heavy  clients=16  writes= 0%      158272 tps     0.101 ms  hits 99%
+  qcache           E2 heavy  clients=16  writes= 1%        2602 tps     6.149 ms  hits 64%
+  qcache           E2 heavy  clients=16  writes= 1%        2628 tps     6.088 ms  hits 64%
+  qcache           E2 heavy  clients=16  writes= 1%        2461 tps     6.501 ms  hits 61%
+  qcache           E2 heavy  clients=16  writes= 5%        1291 tps    12.394 ms  hits 23%
+  qcache           E2 heavy  clients=16  writes= 5%        1338 tps    11.955 ms  hits 24%
+  qcache           E2 heavy  clients=16  writes= 5%        1233 tps    12.973 ms  hits 23%
+  qcache           E2 heavy  clients=16  writes=20%        1241 tps    12.892 ms  hits 4%
+  qcache           E2 heavy  clients=16  writes=20%        1236 tps    12.948 ms  hits 5%
+  qcache           E2 heavy  clients=16  writes=20%        1199 tps    13.350 ms  hits 4%
+  qcache           E3 lookup clients=16  writes= 0%      278886 tps     0.057 ms  hits 99%
+  qcache           E3 lookup clients=16  writes= 0%      294673 tps     0.054 ms  hits 99%
+  qcache           E3 lookup clients=16  writes= 0%      295987 tps     0.054 ms  hits 99%
+  qcache           E3 lookup clients=16  writes= 1%      286109 tps     0.056 ms  hits 99%
+  qcache           E3 lookup clients=16  writes= 1%      285304 tps     0.056 ms  hits 99%
+  qcache           E3 lookup clients=16  writes= 1%      287765 tps     0.056 ms  hits 99%
+  qcache           E3 lookup clients=16  writes= 5%      275216 tps     0.058 ms  hits 99%
+  qcache           E3 lookup clients=16  writes= 5%      265340 tps     0.060 ms  hits 99%
+  qcache           E3 lookup clients=16  writes= 5%      273618 tps     0.058 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=10%      246974 tps     0.065 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=10%      226402 tps     0.071 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=10%      227587 tps     0.070 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=20%      203764 tps     0.079 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=20%      216042 tps     0.074 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=20%      208626 tps     0.077 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=50%      167054 tps     0.096 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=50%      175686 tps     0.091 ms  hits 99%
+  qcache           E3 lookup clients=16  writes=50%      170599 tps     0.094 ms  hits 99%
+  qcache           E4 lookup clients=1   writes= 5%       40886 tps     0.024 ms  hits 99%
+  qcache           E4 lookup clients=1   writes= 5%       39517 tps     0.025 ms  hits 99%
+  qcache           E4 lookup clients=1   writes= 5%       39274 tps     0.025 ms  hits 99%
+  qcache           E4 lookup clients=2   writes= 5%       82828 tps     0.024 ms  hits 99%
+  qcache           E4 lookup clients=2   writes= 5%       88588 tps     0.023 ms  hits 99%
+  qcache           E4 lookup clients=2   writes= 5%       85114 tps     0.023 ms  hits 99%
+  qcache           E4 lookup clients=4   writes= 5%      137020 tps     0.029 ms  hits 99%
+  qcache           E4 lookup clients=4   writes= 5%      131329 tps     0.030 ms  hits 99%
+  qcache           E4 lookup clients=4   writes= 5%      130859 tps     0.031 ms  hits 99%
+  qcache           E4 lookup clients=8   writes= 5%      193037 tps     0.041 ms  hits 99%
+  qcache           E4 lookup clients=8   writes= 5%      188681 tps     0.042 ms  hits 99%
+  qcache           E4 lookup clients=8   writes= 5%      186733 tps     0.043 ms  hits 99%
+  qcache           E4 lookup clients=16  writes= 5%      249542 tps     0.064 ms  hits 99%
+  qcache           E4 lookup clients=16  writes= 5%      251188 tps     0.064 ms  hits 99%
+  qcache           E4 lookup clients=16  writes= 5%      242014 tps     0.066 ms  hits 99%
+  qcache           E4 lookup clients=32  writes= 5%      234568 tps     0.136 ms  hits 99%
+  qcache           E4 lookup clients=32  writes= 5%      231759 tps     0.138 ms  hits 99%
+  qcache           E4 lookup clients=32  writes= 5%      246031 tps     0.130 ms  hits 99%
+  qcache           E5   1000 cached results: commit 0.023 ms
+  qcache           E5   1000 cached results: commit 0.024 ms
+  qcache           E5   1000 cached results: commit 0.021 ms
+  qcache           E5  10000 cached results: commit 0.014 ms
+  qcache           E5  10000 cached results: commit 0.015 ms
+  qcache           E5  10000 cached results: commit 0.017 ms
+  qcache           E5  50000 cached results: commit 0.015 ms
+  qcache           E5  50000 cached results: commit 0.018 ms
+  qcache           E5  50000 cached results: commit 0.016 ms
+== qcache_admit: E1
+  qcache_admit     E1 heavy  clients=1   writes= 0%       34413 tps     0.029 ms  hits 99%
+  qcache_admit     E1 heavy  clients=1   writes= 0%       34123 tps     0.029 ms  hits 99%
+  qcache_admit     E1 heavy  clients=1   writes= 0%       34028 tps     0.029 ms  hits 99%
+  qcache_admit     E1 cheap  clients=1   writes= 0%       47728 tps     0.021 ms  hits 0%
+  qcache_admit     E1 cheap  clients=1   writes= 0%       49837 tps     0.020 ms  hits 0%
+  qcache_admit     E1 cheap  clients=1   writes= 0%       51292 tps     0.019 ms  hits 0%
+  qcache_admit     E1 unique clients=1   writes= 0%       44723 tps     0.022 ms  hits 0%
+  qcache_admit     E1 unique clients=1   writes= 0%       46548 tps     0.021 ms  hits 0%
+  qcache_admit     E1 unique clients=1   writes= 0%       45631 tps     0.022 ms  hits 0%
+results in /home/joli/IITB/Impl_RelDatab/postgres-hacking/qcache/bench/results.csv; now run: python3 /home/joli/IITB/Impl_RelDatab/postgres-hacking/qcache/bench/analyze.py

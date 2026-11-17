@@ -1,42 +1,8 @@
-/*
- * qcache.c - a basic query result cache for PostgreSQL 18
- * =======================================================
- *
- * WHAT IT DOES
- *   When a SELECT finishes, we keep a copy of its result rows in memory.
- *   When the exact same SELECT is sent again, we send the saved rows back
- *   to the client instead of running the query.
- *
- *   When a transaction that changed a table COMMITs, we throw away every
- *   saved result that was read from that table, so we never return old data.
- *
- * HOW IT PLUGS INTO POSTGRESQL
- *   PostgreSQL handles every query in stages:
- *
- *       parse  ->  plan  ->  executor start  ->  executor run  ->  executor end
- *
- *   At several stages PostgreSQL checks a global "hook" variable.  If an
- *   extension has put a function there, PostgreSQL calls that function
- *   instead of doing the stage itself.  Our function does a little extra
- *   work and then calls the normal PostgreSQL function for that stage.
- *   We use these hooks (each one is a section below):
- *
- *     1. planner_hook        is this query safe to cache?
- *     2. ExecutorStart_hook  build the cache key; notice INSERT/UPDATE/DELETE
- *     3. ExecutorRun_hook    cache hit: send saved rows
- *                            cache miss: run the query and save its rows
- *     4. ProcessUtility_hook notice commands like ALTER TABLE and TRUNCATE
- *     5. a transaction callback, called at COMMIT and ROLLBACK
- *
- * The cache entries and their table versions are shared by all connections.
- *   - Only plain SELECTs sent directly by the client are cached (not queries
- *     inside functions, not prepared statements with parameters).
- *
- * TIP FOR LEARNING
- *   SET qcache.debug = on;   prints a message at every step we take.
- */
+// qcache.c - query result cache for PostgreSQL 18
+// Caches plain client SELECT results and invalidates them after writes.
+// Enable qcache.debug to trace cache decisions.
 
-/* "postgres.h" must always be the first include in PostgreSQL C code. */
+// "postgres.h" must always be the first include in PostgreSQL C code.
 #include "postgres.h"
 
 #include <limits.h>
@@ -69,27 +35,23 @@
 #include "catalog/pg_authid.h"
 #include "utils/acl.h"
 #include "utils/injection_point.h"
+#include "portability/instr_time.h"
 
-/* The hook functions below are written for PostgreSQL 18. */
+// The hook functions below are written for PostgreSQL 18.
 #if PG_VERSION_NUM < 180000 || PG_VERSION_NUM >= 190000
 #error "This version of qcache is written for PostgreSQL 18"
 #endif
 
-/* Every loadable module must contain this line. */
+// Every loadable module must contain this line.
 PG_MODULE_MAGIC;
 
 
-/* ======================================================================
- * PART A. SETTINGS
- *
- * These can be changed with SET, for example:  SET qcache.enabled = off;
- * They are registered with PostgreSQL in _PG_init() at the end of the file.
- * ====================================================================== */
+// PART A. SETTINGS
 
-static bool setting_enabled = true;		/* qcache.enabled */
-static bool setting_debug = false;		/* qcache.debug */
-static int	setting_max_size_kb = 64 * 1024;	/* qcache.max_size: 64 MB */
-static int	setting_max_result_kb = 1024;	/* qcache.max_result_size: 1 MB */
+static bool setting_enabled = true;		// qcache.enabled
+static bool setting_debug = false;		// qcache.debug
+static int	setting_max_size_kb = 64 * 1024;	// qcache.max_size: 64 MB
+static int	setting_max_result_kb = 1024;	// qcache.max_result_size: 1 MB
 #define MAX_TABLES 8
 #define VERSION_SLOTS 65536
 #define EPOCH_SLOT 0
@@ -98,11 +60,23 @@ static int	setting_max_result_kb = 1024;	/* qcache.max_result_size: 1 MB */
 #define QC_MAX_ENTRIES 65536
 static int setting_partitions = QC_MAX_PARTITIONS;
 static int setting_max_entries = QC_MAX_ENTRIES;
-/*
- * qcache.test_skip_precommit: FOR TESTS ONLY.  Skip the PRE_COMMIT bump and
- * bump once at COMMIT, as step 1 did.  The race test uses it to show the
- * stale read that the PRE_COMMIT bump prevents.
- */
+typedef enum InvalidationMode
+{
+	INVALIDATION_LAZY,
+	
+	INVALIDATION_EAGER	// MySQL style
+} InvalidationMode;
+
+static const struct config_enum_entry invalidation_options[] = {
+	{"lazy", INVALIDATION_LAZY, false},
+	{"eager", INVALIDATION_EAGER, false},
+	{NULL, 0, false}
+};
+
+static int	setting_invalidation = INVALIDATION_LAZY;
+static double setting_min_exec_time_ms = 0.0;	// Skip results below this time.
+
+// Test-only option to skip the PRE_COMMIT version bump.
 static bool setting_test_skip_precommit = false;
 
 static const char *const key_settings[] ={
@@ -116,7 +90,7 @@ static const char *const key_settings[] ={
 };
 
 
-/* Print a debug message, only when qcache.debug is on. */
+// Print a debug message, only when qcache.debug is on.
 #define DEBUG_MSG(...) \
 	do { \
 		if (setting_debug) \
@@ -124,9 +98,7 @@ static const char *const key_settings[] ={
 	} while (0)
 
 
-/* ======================================================================
- * PART B. DATA STRUCTURES
- * ====================================================================== */
+// PART B. DATA STRUCTURES
 typedef struct ResultHeader{
 	Size total_len;
 	uint64 num_rows;
@@ -149,13 +121,10 @@ typedef struct QcChunk
 } QcChunk;
 #define QC_CHUNK_DATA (sizeof(((QcChunk *) 0)->data))
 
-/*
- * One saved query result.  All saved results live in a hash table, so that
- * finding one by its key is fast.
- */
+// A saved query result stored in the shared hash table.
 typedef struct CachedResult
 {
-	uint64		key_hash;		/* the hash table's key (must be the first field) */
+	uint64		key_hash;		// the hash table's key (must be the first field)
 
 	QcChunk *first;
 	uint32 block_len;
@@ -170,7 +139,7 @@ typedef struct CachedResult
 
 	pg_atomic_uint32 referenced;
 	pg_atomic_uint64 hits;
-	dlist_node	lru_link;		/* position in the "recently used" list */
+	dlist_node	lru_link;		// position in the "recently used" list
 } CachedResult;
 
 typedef struct QcPartition
@@ -178,18 +147,15 @@ typedef struct QcPartition
 	LWLock *lock;
 	dlist_head lru;
 	QcChunk *free;
-	uint32 nfree;
+	uint32 free_chunk_count;
 	uint64 bytes_used;
 } QcPartition;
 
-/*
- * The SELECT that is running right now, if we may cache it.
- * Filled in by the ExecutorStart hook, used by the ExecutorRun hook.
- */
+// The current cacheable SELECT.
 typedef struct CurrentQuery
 {
-	QueryDesc  *query_desc;		/* PostgreSQL's description of the query */
-	MemoryContext memory;		/* everything below is allocated in here */
+	QueryDesc  *query_desc;		// PostgreSQL's description of the query
+	MemoryContext memory;		// everything below is allocated in here
 
 	uint64		key_hash;
 	char	   *key;
@@ -201,19 +167,14 @@ typedef struct CurrentQuery
 	char *hit_block;
 	Size hit_block_len;
 
-	bool		already_ran;	/* ExecutorRun was already called once */
+	bool		already_ran;	// ExecutorRun was already called once
 } CurrentQuery;
 
-/*
- * A "row collector".  PostgreSQL sends every result row to a receiver
- * object (a DestReceiver) that passes it on to the client.  On a cache miss
- * we put our collector in front of the real receiver: it copies each row
- * for the cache, then hands the row on to the real receiver.
- */
+// Collects rows on a miss while forwarding them to the client.
 typedef struct RowCollector
 {
-	DestReceiver base;			/* must be first: PostgreSQL sees only this part */
-	DestReceiver *real_receiver;	/* where the rows really go (the client) */
+	DestReceiver base;			// must be first: PostgreSQL sees only this part
+	DestReceiver *real_receiver;	// where the rows really go (the client)
 
 	MemoryContext memory;
 	char *block;
@@ -221,19 +182,15 @@ typedef struct RowCollector
 	Size capacity;
 	uint64		num_rows;
 	
-	bool		too_big;		/* the result passed qcache.max_result_size */
+	bool		too_big;		// the result passed qcache.max_result_size
 } RowCollector;
 
 
-/* ======================================================================
- * PART C. GLOBAL VARIABLES
- *
- * The cache entries live in shared memory.  Each backend keeps only local
- * handles for the shared hash tables and temporary state for its query.
- * ====================================================================== */
+// PART C. GLOBAL VARIABLES
+// Cache entries are shared; query state and hash handles are local.
 
-static MemoryContext cache_memory = NULL;	/* parent of current-query state */
-static HTAB *part_hash[QC_MAX_PARTITIONS];	/* local handles for shared hashes */
+static MemoryContext cache_memory = NULL;	// parent of current-query state
+static HTAB *partition_hashes[QC_MAX_PARTITIONS];	// local handles for shared hashes
 typedef struct QcacheShared{
 	pg_atomic_uint64 version[VERSION_SLOTS];
 	pg_atomic_uint32 inflight[VERSION_SLOTS];
@@ -245,34 +202,30 @@ typedef struct QcacheShared{
 	pg_atomic_uint64 evictions;
 }QcacheShared;
 
-static QcacheShared *shared = NULL;
+static QcacheShared *shared_state = NULL;
 
-#define VERSION(slot) pg_atomic_read_membarrier_u64(&shared->version[(slot)])
-#define INFLIGHT(slot) pg_atomic_read_membarrier_u32(&shared->inflight[(slot)])
-#define BUMP_VERSION(slot) pg_atomic_fetch_add_u64(&shared->version[(slot)], 1)
+#define VERSION(slot) pg_atomic_read_membarrier_u64(&shared_state->version[(slot)])
+#define INFLIGHT(slot) pg_atomic_read_membarrier_u32(&shared_state->inflight[(slot)])
+#define BUMP_VERSION(slot) pg_atomic_fetch_add_u64(&shared_state->version[(slot)], 1)
 
-static CurrentQuery current;	/* the SELECT running now (zeroed if none) */
+static CurrentQuery current_query;	// the SELECT running now (zeroed if none)
 
-/*
- * How deep we are in nested queries.  0 means a query sent by the client.
- * A query run inside a function (or EXPLAIN, a cursor...) is at level 1+.
- * We only cache level-0 queries.
- */
+// Nested queries are not cached; level 0 is a client query.
 static int	nesting_level = 0;
 
-/* What the planner hook decided about the plan it made most recently. */
+// Planner hook result for the most recent plan.
 static PlannedStmt *plan_just_made = NULL;
-static const char *plan_just_made_problem = NULL;	/* NULL means safe */
+static const char *plan_just_made_problem = NULL;	// NULL means safe
 static int	plan_just_made_num_tables = 0;
 static TableVersion plan_just_made_tables[MAX_TABLES];
 static uint64 plan_just_made_epoch = 0;
 
-/* What the current transaction changed; acted on at COMMIT. */
-static List *tables_written = NIL;	/* list of table OIDs */
-static bool structure_changed = false;	/* ALTER, TRUNCATE, COPY, ... */
+// Tables changed by the current transaction.
+static List *tables_written = NIL;	// list of table OIDs
+static bool structure_changed = false;	// ALTER, TRUNCATE, COPY, ...
 static bool precommit_done = false;
 
-/* The hook functions that were installed before ours (usually NULL). */
+// Hooks installed before ours.
 static planner_hook_type prev_planner_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun_hook = NULL;
@@ -286,19 +239,14 @@ PG_FUNCTION_INFO_V1(qcache_entries);
 PG_FUNCTION_INFO_V1(qcache_reset);
 
 
-/* ======================================================================
- * PART D. SMALL HELPERS FOR THE CACHE TABLE
- * ====================================================================== */
+// PART D. CACHE HELPERS
 
 static uint32 table_slot(Oid table_oid){
 	uint32 h = hash_combine(murmurhash32((uint32) MyDatabaseId), murmurhash32((uint32) table_oid));
 	return 1 + h % (VERSION_SLOTS - 1);
 }
 
-/*
- * Are the tables still at the versions in the list, and the epoch unchanged?
- * If yes, a result computed at those versions is still correct.
- */
+// Check whether table versions and the epoch are unchanged.
 static bool versions_unchanged(const TableVersion *tables, int num_tables, uint64 epoch){
 	if(INFLIGHT(EPOCH_SLOT) != 0 || VERSION(EPOCH_SLOT) != epoch) return false;
 	for(int i = 0; i < num_tables; i++){
@@ -315,11 +263,7 @@ partition_index(uint64 key_hash)
 	return key_hash % setting_partitions;
 }
 
-/*
- * Sizes derived from the settings.  qcache.max_size, qcache.partitions and
- * qcache.max_entries can only change at server start, so every process
- * computes the same values.
- */
+// Compute shared-memory sizes from startup settings.
 static Size
 total_chunks(void)
 {
@@ -338,7 +282,7 @@ entries_per_partition(void)
 	return Max(1, (setting_max_entries + setting_partitions - 1) / setting_partitions);
 }
 
-/* How many chunks a block of this length needs. */
+// How many chunks a block of this length needs.
 static uint32
 chunks_for(Size block_len)
 {
@@ -402,7 +346,7 @@ free_entry_chunks(QcPartition *partition, CachedResult *entry)
 
 		chunk->next = partition->free;
 		partition->free = chunk;
-		partition->nfree++;
+		partition->free_chunk_count++;
 		chunk = next;
 	}
 	entry->first = NULL;
@@ -414,7 +358,7 @@ allocate_entry_chunks(QcPartition *partition, CachedResult *entry, Size block_le
 	QcChunk *last = NULL;
 	Size needed = chunks_for(block_len);
 
-	if (needed > partition->nfree)
+	if (needed > partition->free_chunk_count)
 		return false;
 
 	entry->nchunks = needed;
@@ -424,7 +368,7 @@ allocate_entry_chunks(QcPartition *partition, CachedResult *entry, Size block_le
 		QcChunk *chunk = partition->free;
 
 		partition->free = chunk->next;
-		partition->nfree--;
+		partition->free_chunk_count--;
 		chunk->next = NULL;
 		if (last == NULL)
 			entry->first = chunk;
@@ -443,9 +387,41 @@ remove_cached_result(QcPartition *partition, CachedResult *entry, bool count_inv
 	dlist_delete(&entry->lru_link);
 	partition->bytes_used -= (uint64) entry->nchunks * QC_CHUNK_SIZE;
 	free_entry_chunks(partition, entry);
-	hash_search(part_hash[partition - shared->parts], &key_hash, HASH_REMOVE, NULL);
+	hash_search(partition_hashes[partition - shared_state->parts], &key_hash, HASH_REMOVE, NULL);
 	if (count_invalidation)
-		pg_atomic_fetch_add_u64(&shared->invalidations, 1);
+		pg_atomic_fetch_add_u64(&shared_state->invalidations, 1);
+}
+// Did this saved result read one of the tables in the list?
+static bool
+entry_reads_any(const CachedResult *entry, List *table_oids)
+{
+	for (int i = 0; i < entry->num_tables; i++)
+	{
+		if (list_member_oid(table_oids, entry->tables[i].oid))
+			return true;
+	}
+	return false;
+}
+
+// Eagerly remove results that read changed tables.
+static void
+remove_results_reading(List *table_oids, bool all)
+{
+	for (int i = 0; i < setting_partitions; i++)
+	{
+		QcPartition *partition = &shared_state->parts[i];
+		dlist_mutable_iter iter;
+
+		LWLockAcquire(partition->lock, LW_EXCLUSIVE);
+		dlist_foreach_modify(iter, &partition->lru)
+		{
+			CachedResult *entry = dlist_container(CachedResult, lru_link, iter.cur);
+
+			if (all || entry_reads_any(entry, table_oids))
+				remove_cached_result(partition, entry, true);
+		}
+		LWLockRelease(partition->lock);
+	}
 }
 
 static void
@@ -453,7 +429,7 @@ remove_all_cached_results(void)
 {
 	for (int i = 0; i < setting_partitions; i++)
 	{
-		QcPartition *partition = &shared->parts[i];
+		QcPartition *partition = &shared_state->parts[i];
 
 		LWLockAcquire(partition->lock, LW_EXCLUSIVE);
 		while (!dlist_is_empty(&partition->lru))
@@ -466,16 +442,16 @@ remove_all_cached_results(void)
 	}
 }
 
-/* Forget the current query and free its memory. */
+// Forget the current query and free its memory.
 static void
 forget_current_query(void)
 {
-	if (current.memory != NULL)
-		MemoryContextDelete(current.memory);
-	memset(&current, 0, sizeof(current));
+	if (current_query.memory != NULL)
+		MemoryContextDelete(current_query.memory);
+	memset(&current_query, 0, sizeof(current_query));
 }
 
-/* Forget what the current transaction changed. */
+// Forget what the current transaction changed.
 static void
 forget_transaction_changes(void)
 {
@@ -485,15 +461,9 @@ forget_transaction_changes(void)
 }
 
 
-/* ======================================================================
- * PART 1. PLANNER HOOK: IS THIS QUERY SAFE TO CACHE?
- *
- * The planner receives the query as a tree (a "Query" struct) and turns it
- * into a plan.  We look at the tree first, because some questions are easy
- * to answer there, then let PostgreSQL plan as usual.
- * ====================================================================== */
+// PART 1. PLANNER HOOK
 
-/* Returns NULL if the query is safe, or a short reason why it is not. */
+// Returns NULL if the query is safe, or a short reason why it is not.
 static const char *
 check_query_tree(Query *query)
 {
@@ -506,10 +476,8 @@ check_query_tree(Query *query)
 	if (query->hasRowSecurity)
 		return "reads a table with row-level security";
 
-	/*
-	 * A "mutable" function can return a different answer without any table
-	 * changing: now(), random(), nextval(), ...  Such a query is never safe.
-	 */
+// A "mutable" function can return a different answer without any table
+// changing: now(), random(), nextval(), ...  Such a query is never safe.
 	if (contain_mutable_functions((Node *) query))
 		return "calls a function that is not IMMUTABLE (like now(), random() or qcache_stats())";
 
@@ -560,10 +528,10 @@ qcache_planner_hook(Query *query, const char *query_string, int cursor_options,
 	const char *problem;
 	PlannedStmt *plan;
 
-	/* Check the tree before planning: the planner may change it. */
+	// Check the tree before planning: the planner may change it.
 	problem = check_query_tree(query);
 
-	/* Let PostgreSQL (or a hook installed before ours) make the plan. */
+	// Let PostgreSQL (or a hook installed before ours) make the plan.
 	if (prev_planner_hook != NULL)
 		plan = prev_planner_hook(query, query_string, cursor_options, bound_params);
 	else
@@ -573,7 +541,7 @@ qcache_planner_hook(Query *query, const char *query_string, int cursor_options,
 	if (problem == NULL)
 		problem = record_table_versions(plan);
 
-	/* Remember our answer; the ExecutorStart hook asks for it. */
+	// Remember our answer; the ExecutorStart hook asks for it.
 	plan_just_made = plan;
 	plan_just_made_problem = problem;
 
@@ -581,21 +549,16 @@ qcache_planner_hook(Query *query, const char *query_string, int cursor_options,
 }
 
 
-/* ======================================================================
- * PART 2. EXECUTOR START HOOK: PREPARE TO CACHE, AND NOTICE WRITES
- *
- * ExecutorStart sets up the plan for running.  Here we know which tables
- * the query uses (the "range table", plan->rtable).
- * ====================================================================== */
+// PART 2. EXECUTOR START HOOK
 
-/* Remember the tables an INSERT/UPDATE/DELETE/MERGE touches. */
+// Remember the tables an INSERT/UPDATE/DELETE/MERGE touches.
 static void
 remember_written_tables(PlannedStmt *plan)
 {
 	ListCell   *cell;
 	MemoryContext old_memory;
 
-	/* tables_written must survive until COMMIT: use our own memory. */
+	// tables_written must survive until COMMIT: use our own memory.
 	old_memory = MemoryContextSwitchTo(cache_memory);
 
 	foreach(cell, plan->rtable)
@@ -603,7 +566,7 @@ remember_written_tables(PlannedStmt *plan)
 		RangeTblEntry *table = (RangeTblEntry *) lfirst(cell);
 
 		if (table->rtekind != RTE_RELATION)
-			continue;			/* not a table (a subquery, a join, ...) */
+			continue;			// not a table (a subquery, a join, ...)
 
 		if (!list_member_oid(tables_written, table->relid))
 		{
@@ -616,10 +579,8 @@ remember_written_tables(PlannedStmt *plan)
 	MemoryContextSwitchTo(old_memory);
 }
 
-/*
- * Checks that need the plan.  Returns NULL if we may cache the query, or a
- * reason why not.  On success, *table_oids is the list of tables it reads.
- */
+// Checks that need the plan.  Returns NULL if we may cache the query, or a
+// reason why not.  On success, *table_oids is the list of tables it reads.
 static const char *
 check_plan(QueryDesc *query_desc, int eflags)
 {
@@ -630,7 +591,7 @@ check_plan(QueryDesc *query_desc, int eflags)
 	if (nesting_level > 0)
 		return "runs inside another command (a function, EXPLAIN, a cursor, ...)";
 
-	/* Only a plan our planner hook has just checked. */
+	// Only a plan our planner hook has just checked.
 	if (plan != plan_just_made)
 		return "uses a saved plan (prepared statement)";
 	if (plan_just_made_problem != NULL)
@@ -648,7 +609,7 @@ check_plan(QueryDesc *query_desc, int eflags)
 	if (structure_changed)
 		return "this transaction ran ALTER, TRUNCATE or a similar command";
 
-	/* Now look at every table the query reads. */
+	// Now look at every table the query reads.
 	foreach(cell, plan->rtable)
 	{
 		RangeTblEntry *table = (RangeTblEntry *) lfirst(cell);
@@ -661,7 +622,7 @@ check_plan(QueryDesc *query_desc, int eflags)
 		if (table->tablesample != NULL)
 			return "uses TABLESAMPLE, which returns random rows";
 
-		/* System catalogs change through commands we do not track. */
+		// System catalogs change through commands we do not track.
 		if (oid < FirstNormalObjectId)
 			return "reads a system catalog";
 
@@ -672,11 +633,11 @@ check_plan(QueryDesc *query_desc, int eflags)
 		if (get_rel_persistence(oid) == RELPERSISTENCE_TEMP)
 			return "reads a temporary table";
 
-		/* Rows can reach these tables through a different table name. */
+		// Rows can reach these tables through a different table name.
 		if (get_rel_relispartition(oid) || has_subclass(oid))
 			return "reads a partition or an inheritance parent";
 
-		/* We cannot see this transaction's own uncommitted changes. */
+		// We cannot see this transaction's own uncommitted changes.
 		if (list_member_oid(tables_written, oid))
 			return "this transaction already changed a table it reads";
 	}
@@ -684,15 +645,7 @@ check_plan(QueryDesc *query_desc, int eflags)
 	return NULL;
 }
 
-/*
- * Build the cache key for the current query.  Two queries share a key only
- * if all of these are equal:
- *   - the user running it            (users can have different permissions)
- *   - the position of the statement in the query string
- *                                     ("SELECT 1; SELECT 2" holds two statements)
- *   - the tables it reads            (search_path can change what "orders" means)
- *   - the full query text
- */
+// Build a key from the user, statement position, settings, tables, and text.
 static void
 build_cache_key(QueryDesc *query_desc)
 {
@@ -709,7 +662,7 @@ build_cache_key(QueryDesc *query_desc)
 		text = "";
 	text_len = strlen(text);
 
-	/* Append each part as raw bytes. */
+	// Append each part as raw bytes.
 	initStringInfo(&key);
 	appendBinaryStringInfo(&key, &database, sizeof(database));
 	appendBinaryStringInfo(&key, &user, sizeof(user));
@@ -720,21 +673,21 @@ build_cache_key(QueryDesc *query_desc)
 	}
 	appendBinaryStringInfo(&key, &start, sizeof(start));
 	appendBinaryStringInfo(&key, &length, sizeof(length));
-	for(int i = 0; i < current.num_tables; i++){
-		appendBinaryStringInfo(&key, &current.tables[i].oid, sizeof(Oid));
+	for(int i = 0; i < current_query.num_tables; i++){
+		appendBinaryStringInfo(&key, &current_query.tables[i].oid, sizeof(Oid));
 	}
 	appendBinaryStringInfo(&key, text, text_len);
 
-	current.key = key.data;
-	current.key_len = key.len;
-	current.key_hash = hash_bytes_extended((const unsigned char *) key.data, key.len, 0);
+	current_query.key = key.data;
+	current_query.key_len = key.len;
+	current_query.key_hash = hash_bytes_extended((const unsigned char *) key.data, key.len, 0);
 
-	/* Keep just this statement's text, for qcache_entries(). */
+	// Keep just this statement's text, for qcache_entries().
 	if (start < 0 || start > text_len)
 		start = 0;
 	if (length <= 0 || start + length > text_len)
 		length = text_len - start;
-	current.query_text = pnstrdup(text + start, length);
+	current_query.query_text = pnstrdup(text + start, length);
 }
 
 static void
@@ -743,20 +696,13 @@ qcache_ExecutorStart_hook(QueryDesc *query_desc, int eflags)
 	const char *problem;
 	MemoryContext old_memory;
 
-	/*
-	 * First let PostgreSQL start the query as usual.  This also checks the
-	 * user's permissions on every table, so a cache hit never skips them.
-	 */
+// Start normally first so permissions are still checked.
 	if (prev_ExecutorStart_hook != NULL)
 		prev_ExecutorStart_hook(query_desc, eflags);
 	else
 		standard_ExecutorStart(query_desc, eflags);
 
-	/*
-	 * Is this a write?  We remember writes at every nesting level, so that a
-	 * write inside a trigger or function counts too, and even when the cache
-	 * is turned off, so that turning it on later never shows old data.
-	 */
+// Record writes at every nesting level, even when caching is disabled.
 	if (query_desc->operation != CMD_SELECT || query_desc->plannedstmt->hasModifyingCTE)
 	{
 		remember_written_tables(query_desc->plannedstmt);
@@ -766,7 +712,7 @@ qcache_ExecutorStart_hook(QueryDesc *query_desc, int eflags)
 	if (!setting_enabled)
 		return;
 
-	/* Is this SELECT safe to cache? */
+	// Is this SELECT safe to cache?
 	problem = check_plan(query_desc, eflags);
 	if (problem != NULL)
 	{
@@ -775,35 +721,26 @@ qcache_ExecutorStart_hook(QueryDesc *query_desc, int eflags)
 		return;
 	}
 
-	/* Yes: remember it as the current query, with its key. */
+	// Yes: remember it as the current query, with its key.
 	forget_current_query();
-	current.query_desc = query_desc;
-	current.memory = AllocSetContextCreate(cache_memory, "qcache current query",
+	current_query.query_desc = query_desc;
+	current_query.memory = AllocSetContextCreate(cache_memory, "qcache current query",
 										   ALLOCSET_DEFAULT_SIZES);
 	
-	current.num_tables = plan_just_made_num_tables;
-	memcpy(current.tables, plan_just_made_tables, sizeof(TableVersion) * plan_just_made_num_tables);
-	current.epoch = plan_just_made_epoch;
-	old_memory = MemoryContextSwitchTo(current.memory);
+	current_query.num_tables = plan_just_made_num_tables;
+	memcpy(current_query.tables, plan_just_made_tables, sizeof(TableVersion) * plan_just_made_num_tables);
+	current_query.epoch = plan_just_made_epoch;
+	old_memory = MemoryContextSwitchTo(current_query.memory);
 	build_cache_key(query_desc);
 	MemoryContextSwitchTo(old_memory);
 }
 
 
-/* ======================================================================
- * PART 3. EXECUTOR RUN HOOK: HIT OR MISS
- *
- * ExecutorRun runs the plan and sends each result row to the query's
- * receiver, query_desc->dest.  This is the heart of the cache.
- * ====================================================================== */
+// PART 3. EXECUTOR RUN HOOK
 
-/* ---- 3a. The row collector (used on a miss) ---- */
+// ---- 3a. The row collector (used on a miss) ----
 
-/*
- * Copy a row.  Large values (over about 2 kB) may be stored outside the
- * row ("TOAST") and the row only points at them; we copy the values
- * themselves, so a saved row never points into a table.
- */
+// Copy a row, including externally stored variable-length values.
 static MinimalTuple
 copy_row(TupleTableSlot *slot)
 {
@@ -814,7 +751,7 @@ copy_row(TupleTableSlot *slot)
 	bool	   *was_copied = palloc0(sizeof(bool) * Max(num_columns, 1));
 	MinimalTuple row;
 
-	/* Make sure every column's value is available in the slot. */
+	// Make sure every column's value is available in the slot.
 	slot_getallattrs(slot);
 
 	for (int i = 0; i < num_columns; i++)
@@ -834,7 +771,7 @@ copy_row(TupleTableSlot *slot)
 		}
 	}
 
-	/* Pack the values into one compact row. */
+	// Pack the values into one compact row.
 	row = heap_form_minimal_tuple(columns, values, is_null, 0);
 
 	for (int i = 0; i < num_columns; i++)
@@ -866,7 +803,7 @@ static void collector_reserve(RowCollector *collector, Size needed){
 	collector->capacity = new_capacity;
 }
 
-/* Called by PostgreSQL once for every result row. */
+// Called by PostgreSQL once for every result row.
 static bool
 collector_receive_row(TupleTableSlot *slot, DestReceiver *self)
 {
@@ -881,7 +818,7 @@ collector_receive_row(TupleTableSlot *slot, DestReceiver *self)
 
 		if (end > (Size) setting_max_result_kb * 1024)
 		{
-			/* Too big to cache: free what we copied and stop copying. */
+			// Too big to cache: free what we copied and stop copying.
 			collector->too_big = true;
 			MemoryContextReset(collector->memory);
 			collector->block = NULL;
@@ -899,11 +836,11 @@ collector_receive_row(TupleTableSlot *slot, DestReceiver *self)
 		MemoryContextSwitchTo(old_memory);
 	}
 
-	/* Hand the row on to the client, unchanged. */
+	// Hand the row on to the client, unchanged.
 	return collector->real_receiver->receiveSlot(slot, collector->real_receiver);
 }
 
-/* Called before the first row and after the last: just pass them on. */
+// Called before the first row and after the last: just pass them on.
 static void
 collector_startup(DestReceiver *self, int operation, TupleDesc columns)
 {
@@ -935,7 +872,7 @@ collector_shutdown(DestReceiver *self)
 static void
 collector_destroy(DestReceiver *self)
 {
-	/* Nothing to do: the collector is freed with the current query. */
+	// Nothing to do: the collector is freed with the current query.
 }
 
 static RowCollector *
@@ -943,22 +880,22 @@ create_row_collector(DestReceiver *real_receiver)
 {
 	RowCollector *collector;
 
-	collector = MemoryContextAllocZero(current.memory, sizeof(RowCollector));
+	collector = MemoryContextAllocZero(current_query.memory, sizeof(RowCollector));
 	collector->base.receiveSlot = collector_receive_row;
 	collector->base.rStartup = collector_startup;
 	collector->base.rShutdown = collector_shutdown;
 	collector->base.rDestroy = collector_destroy;
 	collector->base.mydest = DestNone;
 	collector->real_receiver = real_receiver;
-	collector->memory = AllocSetContextCreate(current.memory, "qcache rows",
+	collector->memory = AllocSetContextCreate(current_query.memory, "qcache rows",
 											  ALLOCSET_DEFAULT_SIZES);
 	return collector;
 }
 
-/* ---- 3b. Saving a result (after a miss) ---- */
+// ---- 3b. Saving a result (after a miss) ----
 
 static void
-save_result(RowCollector *collector)
+save_result(RowCollector *collector, double elapsed_ms)
 {
 	Size		max_size = (Size) setting_max_size_kb * 1024;
 	Size		rows_len;
@@ -978,21 +915,28 @@ save_result(RowCollector *collector)
 		return;
 	}
 
-	if (!versions_unchanged(current.tables, current.num_tables, current.epoch))
+	if (elapsed_ms < setting_min_exec_time_ms)
+	{
+		DEBUG_MSG("qcache: query took %.3f ms, less than qcache.min_exec_time; not saved",
+				  elapsed_ms);
+		return;
+	}
+
+	if (!versions_unchanged(current_query.tables, current_query.num_tables, current_query.epoch))
 	{
 		DEBUG_MSG("qcache: a table changed while the query ran; not saved");
 		return;
 	}
 
-	/* Finish the header. */
+	// Finish the header.
 	header = (ResultHeader *) collector->block;
 	header->num_rows = collector->num_rows;
 	header->total_len = collector->used;
 
-	/* The entry's block: [ rows | key | text ], see CachedResult. */
+	// The entry's block: [ rows | key | text ], see CachedResult.
 	rows_len = MAXALIGN(collector->used);
-	text_len = strlen(current.query_text) + 1;
-	block_len = rows_len + current.key_len + text_len;
+	text_len = strlen(current_query.query_text) + 1;
+	block_len = rows_len + current_query.key_len + text_len;
 	needed = chunks_for(block_len);
 	if (needed > chunks_per_partition())
 	{
@@ -1000,21 +944,21 @@ save_result(RowCollector *collector)
 		return;
 	}
 
-	partition_no = partition_index(current.key_hash);
-	partition = &shared->parts[partition_no];
+	partition_no = partition_index(current_query.key_hash);
+	partition = &shared_state->parts[partition_no];
 
-	block = MemoryContextAlloc(current.memory, block_len);
+	block = MemoryContextAlloc(current_query.memory, block_len);
 	memcpy(block, collector->block, collector->used);
-	memcpy(block + rows_len, current.key, current.key_len);
-	memcpy(block + rows_len + current.key_len, current.query_text, text_len);
+	memcpy(block + rows_len, current_query.key, current_query.key_len);
+	memcpy(block + rows_len + current_query.key_len, current_query.query_text, text_len);
 
 	LWLockAcquire(partition->lock, LW_EXCLUSIVE);
-	entry = (CachedResult *) hash_search(part_hash[partition_no],
-										 &current.key_hash, HASH_FIND, NULL);
+	entry = (CachedResult *) hash_search(partition_hashes[partition_no],
+										 &current_query.key_hash, HASH_FIND, NULL);
 	if (entry != NULL)
 		remove_cached_result(partition, entry, false);
-	while ((partition->nfree < needed ||
-			hash_get_num_entries(part_hash[partition_no]) >= entries_per_partition()) &&
+	while ((partition->free_chunk_count < needed ||
+			hash_get_num_entries(partition_hashes[partition_no]) >= entries_per_partition()) &&
 		   !dlist_is_empty(&partition->lru))
 	{
 		CachedResult *oldest =
@@ -1025,13 +969,13 @@ save_result(RowCollector *collector)
 		else
 		{
 			remove_cached_result(partition, oldest, false);
-			pg_atomic_fetch_add_u64(&shared->evictions, 1);
+			pg_atomic_fetch_add_u64(&shared_state->evictions, 1);
 		}
 	}
 
-	/* Add an entry to the shared hash table. */
-	entry = (CachedResult *) hash_search(part_hash[partition_no],
-										 &current.key_hash,
+	// Add an entry to the shared hash table.
+	entry = (CachedResult *) hash_search(partition_hashes[partition_no],
+										 &current_query.key_hash,
 										 HASH_ENTER_NULL, &found);
 	if (entry == NULL)
 	{
@@ -1041,15 +985,15 @@ save_result(RowCollector *collector)
 	}
 
 	memset(entry, 0, sizeof(*entry));
-	entry->key_len = current.key_len;
+	entry->key_len = current_query.key_len;
 	entry->query_text_len = text_len;
 	entry->block_len = block_len;
-	entry->key_hash = current.key_hash;
+	entry->key_hash = current_query.key_hash;
 	entry->dbid = MyDatabaseId;
 	entry->userid = GetUserId();
 	if (!allocate_entry_chunks(partition, entry, block_len))
 	{
-		hash_search(part_hash[partition_no], &current.key_hash, HASH_REMOVE, NULL);
+		hash_search(partition_hashes[partition_no], &current_query.key_hash, HASH_REMOVE, NULL);
 		LWLockRelease(partition->lock);
 		DEBUG_MSG("qcache: shared arena is full; not saved");
 		return;
@@ -1068,24 +1012,24 @@ save_result(RowCollector *collector)
 		}
 	}
 
-	entry->num_tables = current.num_tables;
-	memcpy(entry->tables, current.tables, sizeof(TableVersion) * current.num_tables);
-	entry->epoch = current.epoch;
+	entry->num_tables = current_query.num_tables;
+	memcpy(entry->tables, current_query.tables, sizeof(TableVersion) * current_query.num_tables);
+	entry->epoch = current_query.epoch;
 	pg_atomic_init_u32(&entry->referenced, 0);
 	pg_atomic_init_u64(&entry->hits, 0);
 
 	dlist_push_head(&partition->lru, &entry->lru_link);
 	partition->bytes_used += (uint64) entry->nchunks * QC_CHUNK_SIZE;
-	pg_atomic_fetch_add_u64(&shared->stores, 1);
+	pg_atomic_fetch_add_u64(&shared_state->stores, 1);
 	LWLockRelease(partition->lock);
 
 	DEBUG_MSG("qcache: saved %llu row(s), %zu bytes in %u chunk(s)",
 			  (unsigned long long) header->num_rows, block_len, needed);
 }
 
-/* ---- 3c. Sending saved rows (on a hit) ---- */
+// ---- 3c. Sending saved rows (on a hit) ----
 
-/* The saved rows must have the same columns the client now expects. */
+// The saved rows must have the same columns the client now expects.
 static bool
 same_columns(ResultHeader *result, TupleDesc columns)
 {
@@ -1096,7 +1040,7 @@ same_columns(ResultHeader *result, TupleDesc columns)
 	return true;
 }
 
-/* Do what standard_ExecutorRun would do, using the saved rows. */
+// Do what standard_ExecutorRun would do, using the saved rows.
 static void
 send_saved_rows(QueryDesc *query_desc, ResultHeader *result)
 {
@@ -1109,7 +1053,7 @@ send_saved_rows(QueryDesc *query_desc, ResultHeader *result)
 	estate->es_processed = 0;
 	receiver->rStartup(receiver, CMD_SELECT, query_desc->tupDesc);
 
-	/* A slot holds one row at a time while it is passed to the receiver. */
+	// A slot holds one row at a time while it is passed to the receiver.
 	slot = MakeSingleTupleTableSlot(query_desc->tupDesc, &TTSOpsMinimalTuple);
 	for (uint64 i = 0; i < result->num_rows; i++)
 	{
@@ -1117,7 +1061,7 @@ send_saved_rows(QueryDesc *query_desc, ResultHeader *result)
 		ExecStoreMinimalTuple(row, slot, false);
 		if (!receiver->receiveSlot(slot, receiver))
 			break;
-		estate->es_processed++;		/* becomes the "SELECT n" row count */
+		estate->es_processed++;		// becomes the "SELECT n" row count
 		position += MAXALIGN(row->t_len);
 	}
 	ExecDropSingleTupleTableSlot(slot);
@@ -1127,57 +1071,55 @@ send_saved_rows(QueryDesc *query_desc, ResultHeader *result)
 	MemoryContextSwitchTo(old_memory);
 }
 
-/* ---- 3d. The hook itself ---- */
+// ---- 3d. The hook itself ----
 
 static void
 qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 count)
 {
 	bool		use_cache = false;
 	RowCollector *collector = NULL;
+	instr_time	started;
+	instr_time	duration;
 
-	/*
-	 * We use the cache only for the current query, only on its first run,
-	 * and only when all rows are wanted at once (count == 0).  Cursors that
-	 * fetch a few rows at a time are left alone.
-	 */
-	if (current.query_desc == query_desc && !current.already_ran &&
+// Cache only the first forward run that requests all rows.
+	if (current_query.query_desc == query_desc && !current_query.already_ran &&
 		count == 0 && ScanDirectionIsForward(direction))
 		use_cache = true;
 
-	if (current.query_desc == query_desc)
-		current.already_ran = true;
+	if (current_query.query_desc == query_desc)
+		current_query.already_ran = true;
 
 	if (use_cache)
 	{
-		int partition_no = partition_index(current.key_hash);
-		QcPartition *partition = &shared->parts[partition_no];
+		int partition_no = partition_index(current_query.key_hash);
+		QcPartition *partition = &shared_state->parts[partition_no];
 		CachedResult *entry;
 		bool hit = false;
 		bool stale = false;
 
 		LWLockAcquire(partition->lock, LW_SHARED);
-		entry = (CachedResult *) hash_search(part_hash[partition_no],
-											 &current.key_hash,
+		entry = (CachedResult *) hash_search(partition_hashes[partition_no],
+											 &current_query.key_hash,
 											 HASH_FIND, NULL);
-		if (entry != NULL && entry_key_matches(entry, current.key, current.key_len) &&
+		if (entry != NULL && entry_key_matches(entry, current_query.key, current_query.key_len) &&
 			versions_unchanged(entry->tables, entry->num_tables, entry->epoch))
 		{
 			ResultHeader *result;
 
-			current.hit_block = MemoryContextAlloc(current.memory, entry->block_len);
-			current.hit_block_len = entry->block_len;
-			copy_entry_block(entry, current.hit_block);
-			result = (ResultHeader *) current.hit_block;
+			current_query.hit_block = MemoryContextAlloc(current_query.memory, entry->block_len);
+			current_query.hit_block_len = entry->block_len;
+			copy_entry_block(entry, current_query.hit_block);
+			result = (ResultHeader *) current_query.hit_block;
 			hit = same_columns(result, query_desc->tupDesc);
 			if (hit)
 			{
 				pg_atomic_write_u32(&entry->referenced, 1);
 				pg_atomic_fetch_add_u64(&entry->hits, 1);
-				pg_atomic_fetch_add_u64(&shared->hits, 1);
+				pg_atomic_fetch_add_u64(&shared_state->hits, 1);
 			}
 		}
 		else if (entry != NULL &&
-				 entry_key_matches(entry, current.key, current.key_len))
+				 entry_key_matches(entry, current_query.key, current_query.key_len))
 			stale = true;
 		LWLockRelease(partition->lock);
 
@@ -1185,11 +1127,11 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 		{
 			DEBUG_MSG("qcache: saved result is out of date (a table it read has changed)");
 			LWLockAcquire(partition->lock, LW_EXCLUSIVE);
-			entry = (CachedResult *) hash_search(part_hash[partition_no],
-												 &current.key_hash,
+			entry = (CachedResult *) hash_search(partition_hashes[partition_no],
+												 &current_query.key_hash,
 												 HASH_FIND, NULL);
 			if (entry != NULL &&
-				entry_key_matches(entry, current.key, current.key_len) &&
+				entry_key_matches(entry, current_query.key, current_query.key_len) &&
 				!versions_unchanged(entry->tables, entry->num_tables,
 									entry->epoch))
 				remove_cached_result(partition, entry, true);
@@ -1198,26 +1140,23 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 
 		if (hit)
 		{
-			/* HIT: send the saved rows and skip running the plan. */
+			// HIT: send the saved rows and skip running the plan.
 			DEBUG_MSG("qcache: HIT, sending %llu saved row(s)",
-					  (unsigned long long) ((ResultHeader *) current.hit_block)->num_rows);
-			send_saved_rows(query_desc, (ResultHeader *) current.hit_block);
+					  (unsigned long long) ((ResultHeader *) current_query.hit_block)->num_rows);
+			send_saved_rows(query_desc, (ResultHeader *) current_query.hit_block);
 			forget_current_query();
 			return;
 		}
 
-		/* MISS: put the row collector in front of the real receiver. */
+		// MISS: put the row collector in front of the real receiver.
 		DEBUG_MSG("qcache: MISS, running the query and saving its rows");
-		pg_atomic_fetch_add_u64(&shared->misses, 1);
+		pg_atomic_fetch_add_u64(&shared_state->misses, 1);
 		collector = create_row_collector(query_desc->dest);
 		query_desc->dest = &collector->base;
 	}
 
-	/*
-	 * Run the query as usual.  PG_TRY/PG_FINALLY is PostgreSQL's way of
-	 * saying "run the FINALLY part even if an error happens", so the
-	 * nesting level and the receiver are always put back.
-	 */
+// Run normally and restore state even if execution fails.
+	INSTR_TIME_SET_CURRENT(started);
 	nesting_level++;
 	PG_TRY();
 	{
@@ -1234,23 +1173,23 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 	}
 	PG_END_TRY();
 
-	/* After a miss, the collector holds every row: save them. */
+	// After a miss, the collector holds every row: save them.
 	if (collector != NULL)
 	{
-		save_result(collector);
+		INSTR_TIME_SET_CURRENT(duration);
+		INSTR_TIME_SUBTRACT(duration, started);
+		save_result(collector, INSTR_TIME_GET_MILLISEC(duration));
 		forget_current_query();
 	}
 }
 
 
-/* ======================================================================
- * PART 4. EXECUTOR FINISH AND END HOOKS: BOOKKEEPING
- * ====================================================================== */
+// PART 4. EXECUTOR FINISH AND END HOOKS
 
 static void
 qcache_ExecutorFinish_hook(QueryDesc *query_desc)
 {
-	/* Anything run while finishing (for example triggers) is nested. */
+	// Anything run while finishing (for example triggers) is nested.
 	nesting_level++;
 	PG_TRY();
 	{
@@ -1269,8 +1208,8 @@ qcache_ExecutorFinish_hook(QueryDesc *query_desc)
 static void
 qcache_ExecutorEnd_hook(QueryDesc *query_desc)
 {
-	/* If the query ended without running, forget it. */
-	if (current.query_desc == query_desc)
+	// If the query ended without running, forget it.
+	if (current_query.query_desc == query_desc)
 		forget_current_query();
 
 	if (prev_ExecutorEnd_hook != NULL)
@@ -1280,23 +1219,18 @@ qcache_ExecutorEnd_hook(QueryDesc *query_desc)
 }
 
 
-/* ======================================================================
- * PART 5. UTILITY HOOK: ALTER, TRUNCATE, COPY AND FRIENDS
- *
- * Commands that are not SELECT/INSERT/UPDATE/DELETE/MERGE are "utility
- * commands", and they do not go through the executor hooks above.
- * ====================================================================== */
+// PART 5. UTILITY HOOK
 
-/* Utility commands that cannot change any table's data or structure. */
+// Utility commands that cannot change any table's data or structure.
 static bool
 is_harmless_command(Node *command)
 {
 	switch (nodeTag(command))
 	{
-		case T_TransactionStmt:		/* BEGIN, COMMIT, ROLLBACK, ... */
+		case T_TransactionStmt:		// BEGIN, COMMIT, ROLLBACK, ...
 			return ((TransactionStmt *) command)->kind != TRANS_STMT_COMMIT_PREPARED;
-		case T_VariableSetStmt:		/* SET */
-		case T_VariableShowStmt:	/* SHOW */
+		case T_VariableSetStmt:		// SET
+		case T_VariableShowStmt:	// SHOW
 		case T_ExplainStmt:
 		case T_PrepareStmt:
 		case T_ExecuteStmt:
@@ -1304,8 +1238,8 @@ is_harmless_command(Node *command)
 		case T_DeclareCursorStmt:
 		case T_FetchStmt:
 		case T_ClosePortalStmt:
-		case T_CallStmt:		/* writes inside procedures and DO blocks */
-		case T_DoStmt:			/* still pass through the executor hooks */
+		case T_CallStmt:		// writes inside procedures and DO blocks
+		case T_DoStmt:			// still pass through the executor hooks
 		case T_ListenStmt:
 		case T_UnlistenStmt:
 		case T_NotifyStmt:
@@ -1325,7 +1259,7 @@ qcache_ProcessUtility_hook(PlannedStmt *plan, const char *query_string,
 {
 	bool		commit_prepared = IsA(plan->utilityStmt, TransactionStmt) &&
 		((TransactionStmt *) plan->utilityStmt)->kind == TRANS_STMT_COMMIT_PREPARED;
-	/* Anything else might change data: clear the whole cache at COMMIT. */
+	// Anything else might change data: clear the whole cache at COMMIT.
 	if (!is_harmless_command(plan->utilityStmt))
 	{
 		if (!structure_changed)
@@ -1335,7 +1269,7 @@ qcache_ProcessUtility_hook(PlannedStmt *plan, const char *query_string,
 	}
 	if (commit_prepared)
 	{
-		pg_atomic_fetch_add_u32(&shared->inflight[EPOCH_SLOT], 1);
+		pg_atomic_fetch_add_u32(&shared_state->inflight[EPOCH_SLOT], 1);
 		BUMP_VERSION(EPOCH_SLOT);
 	}
 
@@ -1355,20 +1289,14 @@ qcache_ProcessUtility_hook(PlannedStmt *plan, const char *query_string,
 		if (commit_prepared)
 		{
 			BUMP_VERSION(EPOCH_SLOT);
-			pg_atomic_fetch_sub_u32(&shared->inflight[EPOCH_SLOT], 1);
+			pg_atomic_fetch_sub_u32(&shared_state->inflight[EPOCH_SLOT], 1);
 		}
 	}
 	PG_END_TRY();
 }
 
 
-/* ======================================================================
- * PART 6. TRANSACTION CALLBACK: COMMIT AND ROLLBACK
- *
- * PostgreSQL calls this at the end of every transaction.  Outside BEGIN ...
- * COMMIT, every single statement is its own transaction, so this also runs
- * after a lone UPDATE.
- * ====================================================================== */
+// PART 6. TRANSACTION CALLBACK
 
 static void
 bump_written(bool begin_inflight, bool end_inflight)
@@ -1380,18 +1308,18 @@ bump_written(bool begin_inflight, bool end_inflight)
 		uint32		slot = table_slot(lfirst_oid(cell));
 
 		if (begin_inflight)
-			pg_atomic_fetch_add_u32(&shared->inflight[slot], 1);
+			pg_atomic_fetch_add_u32(&shared_state->inflight[slot], 1);
 		BUMP_VERSION(slot);
 		if (end_inflight)
-			pg_atomic_fetch_sub_u32(&shared->inflight[slot], 1);
+			pg_atomic_fetch_sub_u32(&shared_state->inflight[slot], 1);
 	}
 	if (structure_changed)
 	{
 		if (begin_inflight)
-			pg_atomic_fetch_add_u32(&shared->inflight[EPOCH_SLOT], 1);
+			pg_atomic_fetch_add_u32(&shared_state->inflight[EPOCH_SLOT], 1);
 		BUMP_VERSION(EPOCH_SLOT);
 		if (end_inflight)
-			pg_atomic_fetch_sub_u32(&shared->inflight[EPOCH_SLOT], 1);
+			pg_atomic_fetch_sub_u32(&shared_state->inflight[EPOCH_SLOT], 1);
 	}
 }
 
@@ -1407,14 +1335,14 @@ qcache_transaction_callback(XactEvent event, void *arg)
 				break;
 			bump_written(true, false);
 			precommit_done = true;
+			if (setting_invalidation == INVALIDATION_EAGER)
+				remove_results_reading(tables_written, structure_changed);
 			break;
 
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PREPARE:
-			/*
-			 * The changes are now permanent.  The second version bump
-			 * prevents a reader from treating the in-flight window as stable.
-			 */
+// The changes are now permanent.  The second version bump
+// prevents a reader from treating the in-flight window as stable.
 			if (wrote)
 				INJECTION_POINT("qcache-before-commit-bump", NULL);
 			if (precommit_done)
@@ -1424,12 +1352,10 @@ qcache_transaction_callback(XactEvent event, void *arg)
 			}
 			else if (wrote)
 			{
-				/*
-				 * No PRE_COMMIT bump happened: PREPARE TRANSACTION (which has
-				 * no PRE_COMMIT event), or qcache.test_skip_precommit.  Bump
-				 * once now; for PREPARE the data becomes visible only at
-				 * COMMIT PREPARED, which bumps the epoch again.
-				 */
+// No PRE_COMMIT bump happened: PREPARE TRANSACTION (which has
+// no PRE_COMMIT event), or qcache.test_skip_precommit.  Bump
+// once now; for PREPARE the data becomes visible only at
+// COMMIT PREPARED, which bumps the epoch again.
 				bump_written(false, false);
 			}
 
@@ -1445,7 +1371,7 @@ qcache_transaction_callback(XactEvent event, void *arg)
 			break;
 
 		case XACT_EVENT_ABORT:
-			/* ROLLBACK or an error: the data did not change, keep the cache. */
+			// ROLLBACK or an error: the data did not change, keep the cache.
 			if (precommit_done)
 			{
 				bump_written(false, true);
@@ -1462,11 +1388,7 @@ qcache_transaction_callback(XactEvent event, void *arg)
 }
 
 
-/* ======================================================================
- * PART 7. SQL FUNCTIONS: qcache_stats(), qcache_entries(), qcache_reset()
- *
- * These are declared in qcache--1.0.sql, which CREATE EXTENSION runs.
- * ====================================================================== */
+// PART 7. SQL FUNCTIONS
 
 Datum
 qcache_stats(PG_FUNCTION_ARGS)
@@ -1482,21 +1404,21 @@ qcache_stats(PG_FUNCTION_ARGS)
 
 	for (int i = 0; i < setting_partitions; i++)
 	{
-		QcPartition *partition = &shared->parts[i];
+		QcPartition *partition = &shared_state->parts[i];
 
 		LWLockAcquire(partition->lock, LW_SHARED);
-		entries += hash_get_num_entries(part_hash[i]);
+		entries += hash_get_num_entries(partition_hashes[i]);
 		bytes += partition->bytes_used;
 		LWLockRelease(partition->lock);
 	}
 
 	values[0] = Int64GetDatum(entries);
 	values[1] = Int64GetDatum(bytes);
-	values[2] = Int64GetDatum((int64) pg_atomic_read_u64(&shared->hits));
-	values[3] = Int64GetDatum((int64) pg_atomic_read_u64(&shared->misses));
-	values[4] = Int64GetDatum((int64) pg_atomic_read_u64(&shared->stores));
-	values[5] = Int64GetDatum((int64) pg_atomic_read_u64(&shared->invalidations));
-	values[6] = Int64GetDatum((int64) pg_atomic_read_u64(&shared->evictions));
+	values[2] = Int64GetDatum((int64) pg_atomic_read_u64(&shared_state->hits));
+	values[3] = Int64GetDatum((int64) pg_atomic_read_u64(&shared_state->misses));
+	values[4] = Int64GetDatum((int64) pg_atomic_read_u64(&shared_state->stores));
+	values[5] = Int64GetDatum((int64) pg_atomic_read_u64(&shared_state->invalidations));
+	values[6] = Int64GetDatum((int64) pg_atomic_read_u64(&shared_state->evictions));
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(result_columns, values, nulls)));
 }
@@ -1506,12 +1428,12 @@ qcache_entries(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *result = (ReturnSetInfo *) fcinfo->resultinfo;
 	bool		see_all = has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS);
-	/* Prepare to return many rows at once. */
+	// Prepare to return many rows at once.
 	InitMaterializedSRF(fcinfo, 0);
 
 	for (int i = 0; i < setting_partitions; i++)
 	{
-		QcPartition *partition = &shared->parts[i];
+		QcPartition *partition = &shared_state->parts[i];
 		dlist_iter iter;
 
 		LWLockAcquire(partition->lock, LW_SHARED);
@@ -1548,28 +1470,14 @@ Datum
 qcache_reset(PG_FUNCTION_ARGS)
 {
 	remove_all_cached_results();
-	pg_atomic_write_u64(&shared->hits, 0);
-	pg_atomic_write_u64(&shared->misses, 0);
-	pg_atomic_write_u64(&shared->stores, 0);
-	pg_atomic_write_u64(&shared->invalidations, 0);
-	pg_atomic_write_u64(&shared->evictions, 0);
+	pg_atomic_write_u64(&shared_state->hits, 0);
+	pg_atomic_write_u64(&shared_state->misses, 0);
+	pg_atomic_write_u64(&shared_state->stores, 0);
+	pg_atomic_write_u64(&shared_state->invalidations, 0);
+	pg_atomic_write_u64(&shared_state->evictions, 0);
 	PG_RETURN_VOID();
 }
-/* ======================================================================
- * PART 8. SHARED MEMORY
- *
- * PostgreSQL creates its shared memory once, when the server starts, and
- * every connection process inherits it.  An extension gets a piece of it in
- * two steps, through two hooks:
- *
- *   1. shmem_request_hook: "I will need this many bytes."  Called while the
- *      server computes how much shared memory to create.
- *   2. shmem_startup_hook: "Now set up my bytes."  Called once the memory
- *      exists.  ShmemInitStruct() finds our piece by name, or creates it.
- *
- * The same pattern is used by contrib/pg_stat_statements.
- * ====================================================================== */
-
+// PART 8. SHARED MEMORY
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
@@ -1605,27 +1513,27 @@ qcache_shmem_startup(void)
 	if (prev_shmem_startup_hook != NULL)
 		prev_shmem_startup_hook();
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-	shared = ShmemInitStruct("qcache state", sizeof(QcacheShared), &found);
+	shared_state = ShmemInitStruct("qcache state", sizeof(QcacheShared), &found);
 	locks = GetNamedLWLockTranche("qcache");
 	for (int i = 0; i < setting_partitions; i++)
-		shared->parts[i].lock = &locks[i].lock;
+		shared_state->parts[i].lock = &locks[i].lock;
 
 	if(!found){
 		for(int i = 0; i < VERSION_SLOTS; i++){
-			pg_atomic_init_u64(&shared->version[i], 0);
-			pg_atomic_init_u32(&shared->inflight[i], 0);
+			pg_atomic_init_u64(&shared_state->version[i], 0);
+			pg_atomic_init_u32(&shared_state->inflight[i], 0);
 		}
-		pg_atomic_init_u64(&shared->hits, 0);
-		pg_atomic_init_u64(&shared->misses, 0);
-		pg_atomic_init_u64(&shared->stores, 0);
-		pg_atomic_init_u64(&shared->invalidations, 0);
-		pg_atomic_init_u64(&shared->evictions, 0);
+		pg_atomic_init_u64(&shared_state->hits, 0);
+		pg_atomic_init_u64(&shared_state->misses, 0);
+		pg_atomic_init_u64(&shared_state->stores, 0);
+		pg_atomic_init_u64(&shared_state->invalidations, 0);
+		pg_atomic_init_u64(&shared_state->evictions, 0);
 		for (int i = 0; i < setting_partitions; i++)
 		{
-			dlist_init(&shared->parts[i].lru);
-			shared->parts[i].free = NULL;
-			shared->parts[i].nfree = 0;
-			shared->parts[i].bytes_used = 0;
+			dlist_init(&shared_state->parts[i].lru);
+			shared_state->parts[i].free = NULL;
+			shared_state->parts[i].free_chunk_count = 0;
+			shared_state->parts[i].bytes_used = 0;
 		}
 	}
 
@@ -1638,7 +1546,7 @@ qcache_shmem_startup(void)
 		ctl.keysize = sizeof(uint64);
 		ctl.entrysize = sizeof(CachedResult);
 		snprintf(name, sizeof(name), "qcache part %d", i);
-		part_hash[i] = ShmemInitHash(name, entries_per_partition(),
+		partition_hashes[i] = ShmemInitHash(name, entries_per_partition(),
 									 entries_per_partition(), &ctl,
 									 HASH_ELEM | HASH_BLOBS);
 	}
@@ -1650,7 +1558,7 @@ qcache_shmem_startup(void)
 
 		for (int i = 0; i < setting_partitions; i++)
 		{
-			QcPartition *partition = &shared->parts[i];
+			QcPartition *partition = &shared_state->parts[i];
 
 			for (Size j = 0; j < per_partition; j++)
 			{
@@ -1659,7 +1567,7 @@ qcache_shmem_startup(void)
 
 				chunk->next = partition->free;
 				partition->free = chunk;
-				partition->nfree++;
+				partition->free_chunk_count++;
 			}
 		}
 	}
@@ -1667,12 +1575,7 @@ qcache_shmem_startup(void)
 }
 
 
-/* ======================================================================
- * PART 9. _PG_init: CALLED ONCE WHEN POSTGRESQL LOADS THIS LIBRARY
- *
- * With shared_preload_libraries = 'qcache' this runs when the server
- * starts, and every connection then starts with our hooks in place.
- * ====================================================================== */
+// PART 9. _PG_init
 
 void _PG_init(void){
 	if(!process_shared_preload_libraries_in_progress){
@@ -1709,6 +1612,17 @@ void _PG_init(void){
 							NULL, &setting_max_entries, QC_MAX_ENTRIES,
 							1, QC_MAX_ENTRIES, PGC_POSTMASTER, 0,
 							NULL, NULL, NULL);
+	DefineCustomEnumVariable("qcache.invalidation",
+							 "lazy: a commit only bumps version numbers; eager: it also "
+							 "scans the cache and deletes (MySQL-style baseline).",
+							 NULL, &setting_invalidation, INVALIDATION_LAZY,
+							 invalidation_options, PGC_POSTMASTER, 0,
+							 NULL, NULL, NULL);
+	DefineCustomRealVariable("qcache.min_exec_time",
+							 "Results of queries that ran faster than this (ms) are not saved.",
+							 NULL, &setting_min_exec_time_ms, 0.0,
+							 0.0, 1e9, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
 	DefineCustomBoolVariable("qcache.test_skip_precommit",
 							 "For tests only: skip the PRE_COMMIT version bump.",
 							 NULL, &setting_test_skip_precommit, false,
@@ -1722,11 +1636,7 @@ void _PG_init(void){
 	cache_memory = AllocSetContextCreate(TopMemoryContext, "qcache",
 										 ALLOCSET_DEFAULT_SIZES);
 
-	/*
-	 * 3. Install the hooks.  We save the previous value of each hook first,
-	 * so that another extension using the same hook keeps working: our
-	 * function calls the previous one instead of the standard function.
-	 */
+// Install hooks after saving the previous handlers.
 	prev_planner_hook = planner_hook;
 	planner_hook = qcache_planner_hook;
 
@@ -1745,6 +1655,6 @@ void _PG_init(void){
 	prev_ProcessUtility_hook = ProcessUtility_hook;
 	ProcessUtility_hook = qcache_ProcessUtility_hook;
 
-	/* 4. Ask to be told when transactions end. */
+	// 4. Ask to be told when transactions end.
 	RegisterXactCallback(qcache_transaction_callback, NULL);
 }
