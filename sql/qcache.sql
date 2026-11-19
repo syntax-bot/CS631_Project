@@ -43,7 +43,10 @@ SELECT * FROM tmp;
 SELECT * FROM tmp;
 SELECT hits, stores FROM qcache_stats();
 
--- 7. DDL clears the whole cache, and SELECT * shows the new column
+-- 7. DDL clears the whole cache, and SELECT * shows the new column.
+-- The key is a hash of the query tree, where * is expanded to the column
+-- list: after ALTER the query has a new key, so the old entry is never
+-- looked up and is not counted as an invalidation.
 SELECT qcache_reset();
 SELECT * FROM t WHERE id = 5;
 SELECT * FROM t WHERE id = 5;

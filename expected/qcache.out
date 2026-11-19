@@ -139,7 +139,10 @@ SELECT hits, stores FROM qcache_stats();
     0 |      0
 (1 row)
 
--- 7. DDL clears the whole cache, and SELECT * shows the new column
+-- 7. DDL clears the whole cache, and SELECT * shows the new column.
+-- The key is a hash of the query tree, where * is expanded to the column
+-- list: after ALTER the query has a new key, so the old entry is never
+-- looked up and is not counted as an invalidation.
 SELECT qcache_reset();
  qcache_reset 
 --------------
@@ -168,7 +171,7 @@ SELECT * FROM t WHERE id = 5;
 SELECT hits, misses, invalidations FROM qcache_stats();
  hits | misses | invalidations 
 ------+--------+---------------
-    1 |      2 |             1
+    1 |      2 |             0
 (1 row)
 
 -- 8. TRUNCATE invalidates

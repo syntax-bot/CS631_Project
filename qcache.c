@@ -13,7 +13,9 @@
 #include "access/xact.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_inherits.h"
+#include "common/cryptohash.h"
 #include "common/hashfn.h"
+#include "common/sha2.h"
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -219,6 +221,7 @@ static const char *plan_just_made_problem = NULL;	// NULL means safe
 static int	plan_just_made_num_tables = 0;
 static TableVersion plan_just_made_tables[MAX_TABLES];
 static uint64 plan_just_made_epoch = 0;
+static uint8 plan_just_made_tree_hash[PG_SHA256_DIGEST_LENGTH];	// hash of the query tree
 
 // Tables changed by the current transaction.
 static List *tables_written = NIL;	// list of table OIDs
@@ -521,6 +524,25 @@ static const char * record_table_versions(PlannedStmt *plan){
 	return NULL;
 }
 
+// Hash the query tree, so that case, spacing and comments in the text do not
+// change the key.  nodeToString() leaves out text positions; constants, table
+// OIDs and column names are kept.  SHA-256 keeps the key short.
+static const char *
+hash_query_tree(Query *query, uint8 *hash)
+{
+	char	   *tree = nodeToString(query);
+	pg_cryptohash_ctx *ctx = pg_cryptohash_create(PG_SHA256);
+	bool		ok;
+
+	ok = ctx != NULL &&
+		pg_cryptohash_init(ctx) == 0 &&
+		pg_cryptohash_update(ctx, (const uint8 *) tree, strlen(tree)) == 0 &&
+		pg_cryptohash_final(ctx, hash, PG_SHA256_DIGEST_LENGTH) == 0;
+	pg_cryptohash_free(ctx);
+	pfree(tree);
+	return ok ? NULL : "could not hash the query tree";
+}
+
 static PlannedStmt *
 qcache_planner_hook(Query *query, const char *query_string, int cursor_options,
 					ParamListInfo bound_params)
@@ -528,8 +550,10 @@ qcache_planner_hook(Query *query, const char *query_string, int cursor_options,
 	const char *problem;
 	PlannedStmt *plan;
 
-	// Check the tree before planning: the planner may change it.
+	// Check and hash the tree before planning: the planner may change it.
 	problem = check_query_tree(query);
+	if (problem == NULL)
+		problem = hash_query_tree(query, plan_just_made_tree_hash);
 
 	// Let PostgreSQL (or a hook installed before ours) make the plan.
 	if (prev_planner_hook != NULL)
@@ -645,7 +669,7 @@ check_plan(QueryDesc *query_desc, int eflags)
 	return NULL;
 }
 
-// Build a key from the user, statement position, settings, tables, and text.
+// Build a key from the user, settings, tables, and the query tree hash.
 static void
 build_cache_key(QueryDesc *query_desc)
 {
@@ -671,12 +695,10 @@ build_cache_key(QueryDesc *query_desc)
 		appendStringInfoString(&key, value ? value : "");
 		appendStringInfoChar(&key, '\0');
 	}
-	appendBinaryStringInfo(&key, &start, sizeof(start));
-	appendBinaryStringInfo(&key, &length, sizeof(length));
 	for(int i = 0; i < cur_query.num_tables; i++){
 		appendBinaryStringInfo(&key, &cur_query.tables[i].oid, sizeof(Oid));
 	}
-	appendBinaryStringInfo(&key, text, text_len);
+	appendBinaryStringInfo(&key, plan_just_made_tree_hash, PG_SHA256_DIGEST_LENGTH);
 
 	cur_query.key = key.data;
 	cur_query.key_len = key.len;
