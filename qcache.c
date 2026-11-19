@@ -208,7 +208,7 @@ static QcacheShared *shared_state = NULL;
 #define INFLIGHT(slot) pg_atomic_read_membarrier_u32(&shared_state->inflight[(slot)])
 #define BUMP_VERSION(slot) pg_atomic_fetch_add_u64(&shared_state->version[(slot)], 1)
 
-static CurrentQuery current_query;	// the SELECT running now (zeroed if none)
+static CurrentQuery cur_query;	// the SELECT running now (zeroed if none)
 
 // Nested queries are not cached; level 0 is a client query.
 static int	nesting_level = 0;
@@ -446,9 +446,9 @@ remove_all_cached_results(void)
 static void
 forget_current_query(void)
 {
-	if (current_query.memory != NULL)
-		MemoryContextDelete(current_query.memory);
-	memset(&current_query, 0, sizeof(current_query));
+	if (cur_query.memory != NULL)
+		MemoryContextDelete(cur_query.memory);
+	memset(&cur_query, 0, sizeof(cur_query));
 }
 
 // Forget what the current transaction changed.
@@ -673,21 +673,21 @@ build_cache_key(QueryDesc *query_desc)
 	}
 	appendBinaryStringInfo(&key, &start, sizeof(start));
 	appendBinaryStringInfo(&key, &length, sizeof(length));
-	for(int i = 0; i < current_query.num_tables; i++){
-		appendBinaryStringInfo(&key, &current_query.tables[i].oid, sizeof(Oid));
+	for(int i = 0; i < cur_query.num_tables; i++){
+		appendBinaryStringInfo(&key, &cur_query.tables[i].oid, sizeof(Oid));
 	}
 	appendBinaryStringInfo(&key, text, text_len);
 
-	current_query.key = key.data;
-	current_query.key_len = key.len;
-	current_query.key_hash = hash_bytes_extended((const unsigned char *) key.data, key.len, 0);
+	cur_query.key = key.data;
+	cur_query.key_len = key.len;
+	cur_query.key_hash = hash_bytes_extended((const unsigned char *) key.data, key.len, 0);
 
 	// Keep just this statement's text, for qcache_entries().
 	if (start < 0 || start > text_len)
 		start = 0;
 	if (length <= 0 || start + length > text_len)
 		length = text_len - start;
-	current_query.query_text = pnstrdup(text + start, length);
+	cur_query.query_text = pnstrdup(text + start, length);
 }
 
 static void
@@ -723,14 +723,14 @@ qcache_ExecutorStart_hook(QueryDesc *query_desc, int eflags)
 
 	// Yes: remember it as the current query, with its key.
 	forget_current_query();
-	current_query.query_desc = query_desc;
-	current_query.memory = AllocSetContextCreate(cache_memory, "qcache current query",
+	cur_query.query_desc = query_desc;
+	cur_query.memory = AllocSetContextCreate(cache_memory, "qcache current query",
 										   ALLOCSET_DEFAULT_SIZES);
 	
-	current_query.num_tables = plan_just_made_num_tables;
-	memcpy(current_query.tables, plan_just_made_tables, sizeof(TableVersion) * plan_just_made_num_tables);
-	current_query.epoch = plan_just_made_epoch;
-	old_memory = MemoryContextSwitchTo(current_query.memory);
+	cur_query.num_tables = plan_just_made_num_tables;
+	memcpy(cur_query.tables, plan_just_made_tables, sizeof(TableVersion) * plan_just_made_num_tables);
+	cur_query.epoch = plan_just_made_epoch;
+	old_memory = MemoryContextSwitchTo(cur_query.memory);
 	build_cache_key(query_desc);
 	MemoryContextSwitchTo(old_memory);
 }
@@ -880,14 +880,14 @@ create_row_collector(DestReceiver *real_receiver)
 {
 	RowCollector *collector;
 
-	collector = MemoryContextAllocZero(current_query.memory, sizeof(RowCollector));
+	collector = MemoryContextAllocZero(cur_query.memory, sizeof(RowCollector));
 	collector->base.receiveSlot = collector_receive_row;
 	collector->base.rStartup = collector_startup;
 	collector->base.rShutdown = collector_shutdown;
 	collector->base.rDestroy = collector_destroy;
 	collector->base.mydest = DestNone;
 	collector->real_receiver = real_receiver;
-	collector->memory = AllocSetContextCreate(current_query.memory, "qcache rows",
+	collector->memory = AllocSetContextCreate(cur_query.memory, "qcache rows",
 											  ALLOCSET_DEFAULT_SIZES);
 	return collector;
 }
@@ -922,7 +922,7 @@ save_result(RowCollector *collector, double elapsed_ms)
 		return;
 	}
 
-	if (!versions_unchanged(current_query.tables, current_query.num_tables, current_query.epoch))
+	if (!versions_unchanged(cur_query.tables, cur_query.num_tables, cur_query.epoch))
 	{
 		DEBUG_MSG("qcache: a table changed while the query ran; not saved");
 		return;
@@ -935,8 +935,8 @@ save_result(RowCollector *collector, double elapsed_ms)
 
 	// The entry's block: [ rows | key | text ], see CachedResult.
 	rows_len = MAXALIGN(collector->used);
-	text_len = strlen(current_query.query_text) + 1;
-	block_len = rows_len + current_query.key_len + text_len;
+	text_len = strlen(cur_query.query_text) + 1;
+	block_len = rows_len + cur_query.key_len + text_len;
 	needed = chunks_for(block_len);
 	if (needed > chunks_per_partition())
 	{
@@ -944,17 +944,17 @@ save_result(RowCollector *collector, double elapsed_ms)
 		return;
 	}
 
-	partition_no = partition_index(current_query.key_hash);
+	partition_no = partition_index(cur_query.key_hash);
 	partition = &shared_state->parts[partition_no];
 
-	block = MemoryContextAlloc(current_query.memory, block_len);
+	block = MemoryContextAlloc(cur_query.memory, block_len);
 	memcpy(block, collector->block, collector->used);
-	memcpy(block + rows_len, current_query.key, current_query.key_len);
-	memcpy(block + rows_len + current_query.key_len, current_query.query_text, text_len);
+	memcpy(block + rows_len, cur_query.key, cur_query.key_len);
+	memcpy(block + rows_len + cur_query.key_len, cur_query.query_text, text_len);
 
 	LWLockAcquire(partition->lock, LW_EXCLUSIVE);
 	entry = (CachedResult *) hash_search(partition_hashes[partition_no],
-										 &current_query.key_hash, HASH_FIND, NULL);
+										 &cur_query.key_hash, HASH_FIND, NULL);
 	if (entry != NULL)
 		remove_cached_result(partition, entry, false);
 	while ((partition->free_chunk_count < needed ||
@@ -975,7 +975,7 @@ save_result(RowCollector *collector, double elapsed_ms)
 
 	// Add an entry to the shared hash table.
 	entry = (CachedResult *) hash_search(partition_hashes[partition_no],
-										 &current_query.key_hash,
+										 &cur_query.key_hash,
 										 HASH_ENTER_NULL, &found);
 	if (entry == NULL)
 	{
@@ -985,15 +985,15 @@ save_result(RowCollector *collector, double elapsed_ms)
 	}
 
 	memset(entry, 0, sizeof(*entry));
-	entry->key_len = current_query.key_len;
+	entry->key_len = cur_query.key_len;
 	entry->query_text_len = text_len;
 	entry->block_len = block_len;
-	entry->key_hash = current_query.key_hash;
+	entry->key_hash = cur_query.key_hash;
 	entry->dbid = MyDatabaseId;
 	entry->userid = GetUserId();
 	if (!allocate_entry_chunks(partition, entry, block_len))
 	{
-		hash_search(partition_hashes[partition_no], &current_query.key_hash, HASH_REMOVE, NULL);
+		hash_search(partition_hashes[partition_no], &cur_query.key_hash, HASH_REMOVE, NULL);
 		LWLockRelease(partition->lock);
 		DEBUG_MSG("qcache: shared arena is full; not saved");
 		return;
@@ -1012,9 +1012,9 @@ save_result(RowCollector *collector, double elapsed_ms)
 		}
 	}
 
-	entry->num_tables = current_query.num_tables;
-	memcpy(entry->tables, current_query.tables, sizeof(TableVersion) * current_query.num_tables);
-	entry->epoch = current_query.epoch;
+	entry->num_tables = cur_query.num_tables;
+	memcpy(entry->tables, cur_query.tables, sizeof(TableVersion) * cur_query.num_tables);
+	entry->epoch = cur_query.epoch;
 	pg_atomic_init_u32(&entry->referenced, 0);
 	pg_atomic_init_u64(&entry->hits, 0);
 
@@ -1082,16 +1082,16 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 	instr_time	duration;
 
 // Cache only the first forward run that requests all rows.
-	if (current_query.query_desc == query_desc && !current_query.already_ran &&
+	if (cur_query.query_desc == query_desc && !cur_query.already_ran &&
 		count == 0 && ScanDirectionIsForward(direction))
 		use_cache = true;
 
-	if (current_query.query_desc == query_desc)
-		current_query.already_ran = true;
+	if (cur_query.query_desc == query_desc)
+		cur_query.already_ran = true;
 
 	if (use_cache)
 	{
-		int partition_no = partition_index(current_query.key_hash);
+		int partition_no = partition_index(cur_query.key_hash);
 		QcPartition *partition = &shared_state->parts[partition_no];
 		CachedResult *entry;
 		bool hit = false;
@@ -1099,17 +1099,17 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 
 		LWLockAcquire(partition->lock, LW_SHARED);
 		entry = (CachedResult *) hash_search(partition_hashes[partition_no],
-											 &current_query.key_hash,
+											 &cur_query.key_hash,
 											 HASH_FIND, NULL);
-		if (entry != NULL && entry_key_matches(entry, current_query.key, current_query.key_len) &&
+		if (entry != NULL && entry_key_matches(entry, cur_query.key, cur_query.key_len) &&
 			versions_unchanged(entry->tables, entry->num_tables, entry->epoch))
 		{
 			ResultHeader *result;
 
-			current_query.hit_block = MemoryContextAlloc(current_query.memory, entry->block_len);
-			current_query.hit_block_len = entry->block_len;
-			copy_entry_block(entry, current_query.hit_block);
-			result = (ResultHeader *) current_query.hit_block;
+			cur_query.hit_block = MemoryContextAlloc(cur_query.memory, entry->block_len);
+			cur_query.hit_block_len = entry->block_len;
+			copy_entry_block(entry, cur_query.hit_block);
+			result = (ResultHeader *) cur_query.hit_block;
 			hit = same_columns(result, query_desc->tupDesc);
 			if (hit)
 			{
@@ -1119,7 +1119,7 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 			}
 		}
 		else if (entry != NULL &&
-				 entry_key_matches(entry, current_query.key, current_query.key_len))
+				 entry_key_matches(entry, cur_query.key, cur_query.key_len))
 			stale = true;
 		LWLockRelease(partition->lock);
 
@@ -1128,10 +1128,10 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 			DEBUG_MSG("qcache: saved result is out of date (a table it read has changed)");
 			LWLockAcquire(partition->lock, LW_EXCLUSIVE);
 			entry = (CachedResult *) hash_search(partition_hashes[partition_no],
-												 &current_query.key_hash,
+												 &cur_query.key_hash,
 												 HASH_FIND, NULL);
 			if (entry != NULL &&
-				entry_key_matches(entry, current_query.key, current_query.key_len) &&
+				entry_key_matches(entry, cur_query.key, cur_query.key_len) &&
 				!versions_unchanged(entry->tables, entry->num_tables,
 									entry->epoch))
 				remove_cached_result(partition, entry, true);
@@ -1142,8 +1142,8 @@ qcache_ExecutorRun_hook(QueryDesc *query_desc, ScanDirection direction, uint64 c
 		{
 			// HIT: send the saved rows and skip running the plan.
 			DEBUG_MSG("qcache: HIT, sending %llu saved row(s)",
-					  (unsigned long long) ((ResultHeader *) current_query.hit_block)->num_rows);
-			send_saved_rows(query_desc, (ResultHeader *) current_query.hit_block);
+					  (unsigned long long) ((ResultHeader *) cur_query.hit_block)->num_rows);
+			send_saved_rows(query_desc, (ResultHeader *) cur_query.hit_block);
 			forget_current_query();
 			return;
 		}
@@ -1209,7 +1209,7 @@ static void
 qcache_ExecutorEnd_hook(QueryDesc *query_desc)
 {
 	// If the query ended without running, forget it.
-	if (current_query.query_desc == query_desc)
+	if (cur_query.query_desc == query_desc)
 		forget_current_query();
 
 	if (prev_ExecutorEnd_hook != NULL)

@@ -28,3 +28,6 @@ CREATE FUNCTION qcache_reset()
 RETURNS void
 AS 'MODULE_PATHNAME', 'qcache_reset'
 LANGUAGE C STRICT VOLATILE;
+
+-- The cache is shared by everyone: only superusers may empty it
+REVOKE ALL ON FUNCTION qcache_reset() FROM PUBLIC;
